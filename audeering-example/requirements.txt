@@ -1,16 +1,22 @@
-# --- Core AI Framework (Locked for RealtimeSTT & Audeering compatibility) ---
+# --- Core AI Framework ---
+# Locked to 2.3.1 to maintain compatibility with legacy audio tools
 torch==2.3.1
 torchaudio==2.3.1
 torchvision==0.18.1
 
-# --- Hugging Face ---
+# --- The NumPy 2.0 Fix ---
+# Must be <2.0. NumPy 2.0 fundamentally breaks DeepFace/SciPy/TensorFlow.
+numpy<2
+
+# --- Hugging Face (Text & Audio Wrappers) ---
 transformers>=4.38.0
 
 # --- Audio Processing & Recording ---
 librosa>=0.10.1
-numpy>=1.24.0
 sounddevice>=0.4.6
 soundfile>=0.12.1
 
-# --- Speech to Text ---
-RealtimeSTT
+# --- Video Processing & Facial Emotion ---
+deepface
+tf-keras
+opencv-python
