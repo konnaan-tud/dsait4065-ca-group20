@@ -1,16 +1,9 @@
 import torch
 import numpy as np
 import librosa
-from transformers import Wav2Vec2PreTrainedModel, PretrainedConfig
+from transformers import PretrainedConfig
+from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2PreTrainedModel
 from torch import nn
-
-
-
-
-signal = torch.from_numpy(
-    librosa.load('test_audio_files/neutral.wav', sr=16000)[0])[None, :]
-device = 'cpu'
-
 
 
 def _prenorm(x, attention_mask=None):
@@ -193,11 +186,6 @@ class Wav2Small(Wav2Vec2PreTrainedModel):
         x = self.vgg7(x, attention_mask=attention_mask)
         return self.adv(x)
 
-
-model = Wav2Small.from_pretrained(
-    'audeering/wav2small').to(device).eval()
-with torch.no_grad():
-    logits = model(signal.to(device))
 
 # print(f'\nArousal={logits[:, 0]}\n',
 #       f'Dominance={logits[:, 1]}\n',

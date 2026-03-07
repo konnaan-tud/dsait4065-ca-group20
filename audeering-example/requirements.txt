@@ -1,4 +1,16 @@
-torch
-librosa
-numpy
-transformers
+# --- Core AI Framework (Locked for RealtimeSTT & Audeering compatibility) ---
+torch==2.3.1
+torchaudio==2.3.1
+torchvision==0.18.1
+
+# --- Hugging Face ---
+transformers>=4.38.0
+
+# --- Audio Processing & Recording ---
+librosa>=0.10.1
+numpy>=1.24.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# --- Speech to Text ---
+RealtimeSTT
