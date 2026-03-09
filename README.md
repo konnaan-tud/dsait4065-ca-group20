@@ -27,6 +27,7 @@ You must have Ollama installed and running locally with the Llama 3 model downlo
 Open your terminal and execute the script:
 
 ```
+cd input_model
 python master_fusion.py
 ```
 
