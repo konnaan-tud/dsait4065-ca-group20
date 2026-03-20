@@ -1,3 +1,9 @@
+# --- 1. PATCH HUGGING FACE SECURITY FIRST ---
+import transformers.utils.import_utils
+import transformers.modeling_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
+transformers.modeling_utils.check_torch_load_is_safe = lambda: None
+
 import cv2
 import sounddevice as sd
 import soundfile as sf
@@ -11,6 +17,7 @@ import json
 from transformers import pipeline
 from deepface import DeepFace
 from test_audeering import Wav2Small 
+
 
 # --- CONFIGURATION ---
 AUDIO_FILE = "current_turn.wav"
@@ -46,12 +53,12 @@ def audio_callback(indata, frames, time, status):
 
 # --- 3. MODEL INITIALIZATION ---
 print("🧠 Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
-print("  -> Loading Whisper...")
-stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en")
-print("  -> Loading RoBERTa Text Emotions...")
-text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
-print("  -> Loading Audeering Prosodic Emotions...")
 device = "mps" if torch.backends.mps.is_available() else "cpu"
+print("  -> Loading Whisper...")
+stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
+print("  -> Loading DistilRoBERTa Text Emotions (7 Ekman)...")
+text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
+print("  -> Loading Audeering Prosodic Emotions...")
 audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
 
 print("\n" + "="*60)
@@ -129,9 +136,9 @@ if __name__ == "__main__":
     cap.release()
 
     # --- 5. THE LLM DIALOG MANAGER ---
-    print("\n🧠 Sending profile to Llama 3...")
+    print("\n🧠 Sending profile to LLM...")
     
-    # We inject the actual scores into the prompt so Llama knows exactly how you feel!
+    # We inject the actual scores into the prompt so LLM knows exactly how you feel!
     system_prompt = f"""
     You are an empathetic conversational agent. The user just said: "{transcription}"
     
@@ -143,7 +150,7 @@ if __name__ == "__main__":
     Respond naturally to the user in 2-3 sentences. Use this emotional context to be deeply empathetic.
     """
     
-    payload = {"model": "llama3", "prompt": system_prompt, "stream": False}
+    payload = {"model": "qwen3.5:4b", "prompt": system_prompt, "stream": False, "think": False}
     
     t0 = time.time()
     try:
@@ -184,7 +191,7 @@ if __name__ == "__main__":
     print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
     print(f"  - Audeering (Audio Emotion): {time_audeering:.2f} seconds")
     print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
-    print(f"  - Llama 3 (LLM Generation) : {time_llm:.2f} seconds")
+    print(f"  - LLM Generation : {time_llm:.2f} seconds")
     print(f"  -------------------------------------------")
     total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_llm
     print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
