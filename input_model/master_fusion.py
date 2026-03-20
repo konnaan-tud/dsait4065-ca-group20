@@ -47,11 +47,14 @@ def audio_callback(indata, frames, time, status):
 # --- 3. MODEL INITIALIZATION ---
 print("🧠 Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
 print("  -> Loading Whisper...")
-stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en")
+#stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en")
+stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=0)
 print("  -> Loading RoBERTa Text Emotions...")
-text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
+#text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
+text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None,  device=0)
 print("  -> Loading Audeering Prosodic Emotions...")
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+# device = "mps" if torch.backends.mps.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
 
 print("\n" + "="*60)
@@ -143,14 +146,15 @@ if __name__ == "__main__":
     Respond naturally to the user in 2-3 sentences. Use this emotional context to be deeply empathetic.
     """
     
-    payload = {"model": "llama3", "prompt": system_prompt, "stream": False}
+    payload = {"model": "llama3.2:1b", "prompt": system_prompt, "stream": False} # llama3
     
     t0 = time.time()
     try:
         response = requests.post(OLLAMA_URL, json=payload)
+        print("Ollama raw response:", response.json())  # ← add this
         agent_reply = response.json().get("response", "Error generating response.")
     except Exception as e:
-        agent_reply = "Could not connect to local Ollama LLM."
+        agent_reply = f"Could not connect: {e}"
     time_llm = time.time() - t0
 
     # --- FINAL OUTPUT ---

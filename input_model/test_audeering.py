@@ -34,11 +34,7 @@ class Spectrogram(nn.Module):
         fft_window = librosa.filters.get_window('hann', n_time, fftbins=True)
 
         fft_window = librosa.util.pad_center(fft_window, size=n_time)
-
         
-        
-        
-
         out_channels = n_fft // 2 + 1
         
         (x, y) = np.meshgrid(np.arange(n_time), np.arange(n_fft))
@@ -185,8 +181,3 @@ class Wav2Small(Wav2Vec2PreTrainedModel):
     def forward(self, x, attention_mask=None):
         x = self.vgg7(x, attention_mask=attention_mask)
         return self.adv(x)
-
-
-# print(f'\nArousal={logits[:, 0]}\n',
-#       f'Dominance={logits[:, 1]}\n',
-#       f'Valence={logits[:, 2]}\n')
