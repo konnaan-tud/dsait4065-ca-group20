@@ -12,6 +12,8 @@ from transformers import pipeline
 from deepface import DeepFace
 from test_audeering import Wav2Small 
 import os
+import sys
+from database import PromptDatabase
 
 # --- CONFIGURATION ---
 AUDIO_FILE = "current_turn.wav"
@@ -118,19 +120,30 @@ def process_video_frames(video_frames, cap):
     cap.release()
     return top_face_emo, avg_emotions, valid_frames
 
-def generate_angent_reply(transcription, top_3_text, arousal, valence, dominance,
+def generate_angent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
                          top_face_emo, avg_emotions):
     print("\n🧠 Sending profile to Llama 3...")
-    
+
+    past_context_lines = []
+    for e in helper_events:
+        emotions = e.get("emotions") or {}
+        emotions_str = ", ".join(
+            f"{k}: {v:.2f}" for k, v in emotions.items() if isinstance(v, (int, float))
+        )
+        past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')
+    past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
+
     # We inject the actual scores into the prompt so Llama knows exactly how you feel!
     system_prompt = f"""
     You are an empathetic conversational agent. The user just said: "{transcription}"
-    
+
     Here is the user's hidden emotional profile:
     - Their face looks mostly: {top_face_emo}
     - Their text implies: {top_3_text[0][0]} and {top_3_text[1][0]}
     - Their voice energy (Arousal) is: {arousal:.2f}
-    
+
+    Previous similar things they said (with their emotional state at the time): {past_context}
+
     Respond naturally to the user in 2-3 sentences. Use this emotional context to be deeply empathetic.
     """
     
@@ -148,6 +161,7 @@ if __name__ == "__main__":
     cap = cv2.VideoCapture(0)
     time.sleep(1)
     stt_pipeline, text_emotion_pipeline, audeering_model, device = model_initialization()
+    db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
     
     while True:
         print("\n" + "="*60)
@@ -186,11 +200,28 @@ if __name__ == "__main__":
         # 4. FACIAL EMOTION (DeepFace)
 
         top_face_emo, avg_emotions, valid_frames = process_video_frames(video_frames, cap)
-
+        
+        helper_events = db.query(transcription, n_results=3)
+        print("\n📚 Similar past prompts in Chroma:")
+        for event in helper_events:
+            print(f"  - {event[:40]}...")
+        
         # --- 5. THE LLM DIALOG MANAGER ---
-        agent_reply = generate_angent_reply(transcription, top_3_text, arousal, valence, dominance,
+        agent_reply = generate_angent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
                                         top_face_emo, avg_emotions)
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
                         top_face_emo, avg_emotions, valid_frames, agent_reply)
         save_debug_frames(video_frames)
+
+        # --- 6. STORE IN CHROMA ---
+        emotions_record = {
+            **{f"text_{label}": float(score) for label, score in top_3_text},
+            "audio_arousal": arousal,
+            "audio_valence": valence,
+            "audio_dominance": dominance,
+            "face_dominant": top_face_emo,
+            **{f"face_{emo}": float(score) for emo, score in avg_emotions.items()},
+        }
+        db.add(transcription, emotions_record)
+        print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
