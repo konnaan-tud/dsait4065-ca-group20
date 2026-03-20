@@ -1,7 +1,8 @@
-from test_audeering import Wav2Small
+from .test_audeering import Wav2Small
 import librosa, torch
+import  os
 import sys
-from vad_mapping import VADEmotionMapper, load_vad_prototypes
+from .vad_mapping import VADEmotionMapper, load_vad_prototypes
 
 class ProsodyEmotionPredictor:
 
@@ -10,7 +11,7 @@ class ProsodyEmotionPredictor:
         self.model = Wav2Small.from_pretrained(
             'audeering/wav2small').to(device).eval()
         self.vad_mapper = VADEmotionMapper(
-            prototypes=load_vad_prototypes("vad_mapping.csv"),
+            prototypes=load_vad_prototypes(os.path.join(os.path.dirname(__file__), "vad_mapping.csv")),
             weights=(1.0, 1.0, 1.0), # Weights for VAD
             temperature=0.25, # Lower temp sharpens softmax probabilities
         )

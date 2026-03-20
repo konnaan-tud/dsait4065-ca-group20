@@ -50,10 +50,10 @@ def audio_callback(indata, frames, time, status):
 print("🧠 Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
 print("  -> Loading Whisper...")
 #stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en")
-stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=0)
+stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en")
 print("  -> Loading RoBERTa Text Emotions...")
 #text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
-text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None,  device=0)
+text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
 print("  -> Loading Audeering Prosodic Emotions...")
 # device = "mps" if torch.backends.mps.is_available() else "cpu"
 device = "cuda" if torch.cuda.is_available() else "cpu"
