@@ -10,8 +10,9 @@ import requests
 import json
 from transformers import pipeline
 from deepface import DeepFace
-from test_audeering import Wav2Small 
-from vad_mapping import VADEmotionMapper, load_vad_prototypes
+from input_model.prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
+from input_model.prosodic_modality.test_audeering import Wav2Small 
+from input_model.prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
 
 # --- CONFIGURATION ---
 AUDIO_FILE = "current_turn.wav"
@@ -64,8 +65,9 @@ if __name__ == "__main__":
     is_recording = True
     video_frames = []
     audio_data = []
+    prosodic_predictor = ProsodyEmotionPredictor(device=device)
     vad_mapper = VADEmotionMapper(
-        prototypes=load_vad_prototypes("vad_mapping.csv"),
+        prototypes=load_vad_prototypes("prosodic_modality/vad_mapping.csv"),
         weights=(1.0, 1.0, 1.0),
         temperature=0.25,
     )
@@ -105,6 +107,12 @@ if __name__ == "__main__":
     
     # 3. PROSODIC EMOTION (Audeering)
     t0 = time.time()
+
+    # For now keeping everything the same, as I need to leave soon. 
+    # Commented line below is example of how to predict Ekman from prosody in one line.
+    #
+    # ekman_probs = prosodic_predictor.predict_ekman(audio_path=AUDIO_FILE, sample_rate=SAMPLE_RATE)
+    
     signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
     with torch.no_grad():
         logits = audeering_model(signal.to(device))
