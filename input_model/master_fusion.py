@@ -132,7 +132,7 @@ def generate_angent_reply(transcription, helper_events, top_3_text, arousal, val
         )
         past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')
     past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
-
+    print('\n📚 Past similar prompts with emotional context:\n' + past_context)
     # We inject the actual scores into the prompt so Llama knows exactly how you feel!
     system_prompt = f"""
     You are an empathetic conversational agent. The user just said: "{transcription}"
