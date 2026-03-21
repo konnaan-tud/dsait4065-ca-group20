@@ -1,6 +1,6 @@
 .env
 venv/
-this_env/
+memo_env/
 
 
 **/__pycache__/

@@ -2,7 +2,7 @@ from .test_audeering import Wav2Small
 import librosa, torch
 import  os
 import sys
-from .vad_mapping import VADEmotionMapper, load_vad_prototypes
+from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
 
 class ProsodyEmotionPredictor:
 

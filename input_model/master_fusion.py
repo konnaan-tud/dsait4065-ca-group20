@@ -1,5 +1,6 @@
 import cv2
 import os
+import sys
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -10,9 +11,13 @@ import librosa
 import requests
 from transformers import pipeline
 from deepface import DeepFace
-from input_model.prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
-from input_model.prosodic_modality.test_audeering import Wav2Small 
-from input_model.prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
+from prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
+from prosodic_modality.test_audeering import Wav2Small 
+from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
+
+from confidence import is_confident
+from agreement import analyze_agreement
+from fusion import fuse_modalities
 
 # --- CONFIGURATION ---
 AUDIO_FILE = "current_turn.wav"
@@ -27,24 +32,6 @@ audio_data = []
 print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
 cap = cv2.VideoCapture(0)
 time.sleep(1)
-
-# Checks if the emotion distribution is confident enough based on top1-top2 difference.
-def is_confident(emotion_dict, threshold=CONFIDENCE_THRESHOLD):
-    if not emotion_dict:
-        return False, None, 0.0, 0.0
-
-    sorted_emotions = sorted(emotion_dict.items(), key=lambda x: x[1], reverse=True)
-
-    if len(sorted_emotions) < 2:
-        return False, sorted_emotions[0][0], sorted_emotions[0][1], 0.0
-
-    top1_label, top1_score = sorted_emotions[0]
-    top2_label, top2_score = sorted_emotions[1]
-
-    diff = top1_score - top2_score
-    confident = diff >= threshold
-
-    return confident, top1_label, top1_score, diff
 
 # --- 1. THREAD: VIDEO RECORDER ---
 def record_video():
@@ -132,6 +119,7 @@ if __name__ == "__main__":
     time_roberta = time.time() - t0
 
     # 3. PROSODIC EMOTION (Audeering)
+    #TODO: Change to elegant function
     t0 = time.time()
 
     signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
@@ -200,48 +188,7 @@ if __name__ == "__main__":
             "confidence": face_score
         }
 
-    # Defines agreement and detects conflict
-    def analyze_agreement(modalities):
-
-        if len(modalities) == 0:
-            return "no_data", None
-
-        tops = [m["top"] for m in modalities.values()]
-        counts = {e: tops.count(e) for e in set(tops)}
-
-        max_count = max(counts.values())
-        dominant = max(counts, key=counts.get)
-
-        if max_count == len(modalities):
-            return "full_agreement", dominant
-        elif max_count == 2:
-            return "partial_agreement", dominant
-        else:
-            return "conflict", None
-
-    # Applies weighted linear fusion
-    def fuse_modalities(modalities):
-        emotions = list(next(iter(modalities.values()))["probs"].keys())
-
-        c = {m: modalities[m]["confidence"] for m in modalities}
-        total_c = sum(c.values())
-
-        weights = {m: c[m] / total_c for m in modalities}
-
-        fused = {e: 0.0 for e in emotions}
-
-        for m in modalities:
-            probs = modalities[m]["probs"]
-            for e in emotions:
-                fused[e] += weights[m] * probs[e]
-
-        final_emotion = max(fused, key=fused.get)
-
-        return final_emotion, fused, weights
-
-
     # Define prompts for each case
-
     decision, agreed_emotion = analyze_agreement(modalities)
 
     # CASE 0: No confident modality
