@@ -1,6 +1,7 @@
 import hashlib
 import json
 import chromadb
+from typing import Optional
 
 
 def get_text_id(text: str) -> str:
@@ -42,7 +43,7 @@ class PromptDatabase:
             )
         ]
 
-    def get(self, text: str) -> dict | None:
+    def get(self, text: str) -> Optional[dict]:
         """Exact lookup by text — returns {text, emotions} or None."""
         doc_id = get_text_id(text)
         result = self.collection.get(ids=[doc_id])
