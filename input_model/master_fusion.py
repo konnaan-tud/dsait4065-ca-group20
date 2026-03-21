@@ -72,18 +72,23 @@ def update_running_summary(recent_turns, current_summary):
     transcript = "\n".join(recent_turns)
     
     prompt = f"""
-    Update the running psychological profile of the user based on this new dialogue. 
-    Keep it strictly under 3 sentences. Focus on their core struggle and emotional trajectory.
+    You are managing the Semantic Memory for an empathetic AI agent. 
+    Update the user's psychological profile based on the new dialogue.
+
+    You MUST structure your response EXACTLY in these two bulleted sections:
+
+    1. Core Facts & Context: (Preserve specific details, nouns, and events mentioned by the user. Add new facts without deleting important old ones. Maximum 4 bullet points).
+    2. Emotional Trajectory: (Analyze how their mood or core struggle is shifting right now. Maximum 2 bullet points).
     
-    IMPORTANT: Output ONLY the summary paragraph. Do not include introductory phrases like "Here is the summary" or "The updated profile is".
+    IMPORTANT: Output ONLY the two bulleted sections. Do not include introductory phrases like "Here is the summary" or "The updated profile is".
     
-    Previous Summary:
+    Previous Profile:
     {current_summary if current_summary else "None (Beginning of conversation)"}
     
     New Dialogue:
     {transcript}
     """
-    
+
     payload = {
         "model": "llama3", # Matches your main loop model
         "messages": [{"role": "system", "content": prompt}],
