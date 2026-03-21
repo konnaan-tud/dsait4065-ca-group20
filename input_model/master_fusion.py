@@ -60,7 +60,7 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
 # --- 1. THREAD: VIDEO RECORDER ---
 def record_video(frames, cap):
     global is_recording
-    last_capture_time = 0
+    last_capture_time = time.time()
     while is_recording:
         ret, frame = cap.read()
         if ret:
@@ -68,7 +68,6 @@ def record_video(frames, cap):
             if current_time - last_capture_time >= 1.0:
                 frames.append(frame.copy())
                 last_capture_time = current_time
-        time.sleep(0.1)
 
 # --- 3. MODEL INITIALIZATION ---
 def model_initialization():
@@ -234,8 +233,10 @@ if __name__ == "__main__":
 
         
         # 2. TEXT EMOTION (RoBERTa)
-        text_results = text_emotion_pipeline(transcription)[0]
-        top_3_text = [(res['label'], res['score']) for res in text_results[:3]]
+        # Keep ALL 7 results for the database
+        all_text_emotions = text_emotion_pipeline(transcription)[0] 
+        # Keep only Top 3 for the LLM prompt and printing
+        top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
         
 
         # 3. PROSODIC EMOTION (Audeering)
@@ -264,7 +265,7 @@ if __name__ == "__main__":
 
         # --- 7. STORE IN CHROMA ---
         emotions_record = {
-            **{f"{label}": float(score) for label, score in top_3_text},
+            **{f"text_{res['label']}": float(res['score']) for res in all_text_emotions},
             "audio_arousal": arousal,
             "audio_valence": valence,
             "audio_dominance": dominance,
