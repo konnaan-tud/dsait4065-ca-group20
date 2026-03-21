@@ -37,6 +37,58 @@ CONFIDENCE_THRESHOLD = 0.15 # to test
 
 is_recording = False
 
+# Maps modalities apparently not all modalities have the same name for emotions
+def normalize_emotion(label):
+    mapping = {
+        "angry": "anger",
+        "anger": "anger",
+
+        "sad": "sadness",
+        "sadness": "sadness",
+
+        "happy": "joy",
+        "joy": "joy",
+
+        "fear": "fear",
+        "disgust": "disgust",
+        "surprise": "surprise",
+
+        "neutral": "neutral"
+    }
+
+    return mapping.get(label.lower(), label.lower())
+
+# extract user emotion
+def extract_explicit_emotion(text):
+    text = text.lower()
+
+    emotion_keywords = {
+        "anger": ["angry", "mad", "annoyed", "frustrated"],
+        "disgust": ["disgusted", "gross", "ew", "nasty"],
+        "fear": ["scared", "afraid", "anxious", "nervous"],
+        "joy": ["happy", "good", "great", "excited", "glad"],
+        "sadness": ["sad", "down", "depressed", "unhappy"],
+        "surprise": ["surprised", "shocked", "wow", "unexpected"],
+        "neutral": ["okay", "fine", "alright", "normal"]
+    }
+
+    for emotion, keywords in emotion_keywords.items():
+        if any(word in text for word in keywords):
+            return emotion
+
+    return None
+
+def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
+    results = text_emotion_pipeline(user_reply)[0]
+    predicted = max(results, key=lambda x: x["score"])
+    
+    explicit = extract_explicit_emotion(user_reply)
+
+    if explicit:
+        return explicit, 1.0
+    else:
+        return predicted["label"], max(predicted["score"], 0.85) # give a higher prediction to the output of the text to emotion model
+
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
                        ekman_probs, avg_emotions, valid_frames, agent_reply, text_confident, 
@@ -141,7 +193,9 @@ def process_video_frames(video_frames, cap):
         total=sum(avg_emotions.values())
         avg_emotions={emo:score/total for emo,score in avg_emotions.items()}
 
-        face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions)
+        avg_emotions_norm = {normalize_emotion(k): v for k, v in avg_emotions.items()}
+
+        face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions_norm)
     else:
         avg_emotions=sum_emotions
         face_confident=False
@@ -151,7 +205,7 @@ def process_video_frames(video_frames, cap):
     return top_face_emo, avg_emotions, valid_frames, face_confident, face_score, face_diff
 
 def generate_agent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
-                         top_face_emo, avg_emotions, chat_history, decision, emotion_profile_text):
+                         top_face_emo, avg_emotions, chat_history, decision):
     print("\n🧠 Sending profile to LLM...")
 
     past_context_lines = []
@@ -168,39 +222,56 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
     if decision == "conflict":
         contextual_user_message = f"""
         [Hidden Context for Agent]
-        
-        The emotional signals are conflicting across modalities.
 
-        Ask the user for clarification about how they feel.
+        User message: "{transcription}"
 
-        User Said: "{transcription}"
+        Emotion signals detected by the system:
+
+        - Text analysis suggests: {text_top}
+        - Voice tone suggests: {audio_top}
+        - Facial expression suggests: {top_face_emo}
+
+        These signals do not agree.
+
+        Instructions:
+        - Briefly explain that the signals are mixed.
+        - Mention the different signals naturally.
+        - Ask the user how they are actually feeling.
+        - Keep the response under 2 sentences.
         """
-
         chat_history.append({"role": "user", "content": contextual_user_message})
-    
     elif decision == "no_data":
         contextual_user_message = f"""
         [Hidden Context for Agent]
-        
-        No strong emotional signal was detected.
 
-        Respond naturally and gently.
+        User message: "{transcription}"
 
-        User Said: "{transcription}"
+        No clear emotional signal was detected.
+
+        Instructions:
+        - Respond naturally.
+        - Ask a question that encourages the user to continue the story.
+        - Keep the response under 3 sentences.
         """
-
         chat_history.append({"role": "user", "content": contextual_user_message})
 
     else:
 
-        contextual_user_message = f"""
+        contextual_user_message = contextual_user_message = f"""
         [Hidden Context for Agent]
-        
-        Here is the emotional analysis: {emotion_profile_text}
-        
-        Respond empathetically in 2-3 sentences.
 
-        User Said: "{transcription}"
+        User message: "{transcription}"
+
+        Detected emotional state: {final_emotion if final_emotion else "uncertain"}
+
+        Instructions for the assistant:
+        - You are an empathetic conversational agent.
+        - Acknowledge the user's feelings.
+        - Respond naturally in 2–3 sentences.
+        - Ask one gentle follow-up question about the event.
+        - Do NOT repeat previous responses.
+
+        Write the response.
         """
 
         chat_history.append({"role": "user", "content": contextual_user_message})
@@ -240,6 +311,8 @@ if __name__ == "__main__":
     ]
     
     turn_counter = 1
+
+    pending_conflict_resolution = False
     
     print("\n" + "="*60)
     print("✅ SYSTEM READY. Awaiting your turn.")
@@ -290,12 +363,43 @@ if __name__ == "__main__":
         if not transcription:
             print("⚠️ Whisper didn't hear any words. Try speaking louder.")
             continue
+
+        # Handle reply of user in case of conflict
+        if pending_conflict_resolution:
+            print("🧠 Resolving previous emotional conflict from user reply...")
+
+            final_emotion, final_score = resolve_conflict_with_user(
+                transcription,
+                text_emotion_pipeline
+            )
+
+            emotions_record = {
+                "final_emotion": final_emotion,
+                "final_score": float(final_score),
+                "decision": "user_resolved"
+            }
+
+            db.add(transcription, emotions_record)
+
+            chat_history.append({
+                "role": "system",
+                "content": f"[Resolved user emotion: {final_emotion}]"
+            })
+
+            print(f"💾 Stored resolved emotion → {final_emotion} ({final_score:.2f})")
+
+            pending_conflict_resolution = False
+            
+            # Now generate a NORMAL agent response using resolved emotion
+            decision = "resolved"
+
+            #emotion_profile_text = f"User clarified emotion: {final_emotion}"
     
         # 2. TEXT EMOTION (RoBERTa)
         t0 = time.time()
         # Keep ALL 7 results for the database
         all_text_emotions = text_emotion_pipeline(transcription)[0] 
-        text_emotions = {res["label"]: res["score"] for res in all_text_emotions}
+        text_emotions = {normalize_emotion(res["label"]): res["score"] for res in all_text_emotions}
         text_confident, text_top, text_score, text_diff = is_confident(text_emotions)
         # Keep only Top 3 for the LLM prompt and printing
         top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
@@ -308,8 +412,9 @@ if __name__ == "__main__":
             logits = audeering_model(signal.to(device))
         arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
         ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
+        ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
-        audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs)
+        audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
         time_audeering = time.time() - t0
         
         # 4. FACIAL EMOTION (DeepFace)
@@ -345,9 +450,11 @@ if __name__ == "__main__":
         # Define prompts for each case
         decision, agreed_emotion = analyze_agreement(modalities)
 
+        final_emotion = None
+        final_score = None
+
         # CASE 0: No confident modality
         if decision == "no_data":
-            final_emotion = None
             emotion_profile_text = "No confident emotional signal detected." # TODO: Change text
 
 
@@ -357,20 +464,24 @@ if __name__ == "__main__":
             m = modalities[m_name]
 
             final_emotion = m["top"]
+            final_score = m["confidence"]
 
-            emotion_profile_text = (
-                f"- Single confident modality used: {m_name}\n"
-                f"- Detected emotion: {final_emotion}"
-            ) # TODO: Change text
+            #emotion_profile_text = (
+            #    f"- Single confident modality used: {m_name}\n"
+            #    f"- Detected emotion: {final_emotion}"
+            #) 
 
         # CASE 2: CONFLICT (ALL DIFFERENT)
         elif decision == "conflict":
             final_emotion = None
-            emotion_profile_text = "Conflicting emotional signals across modalities." # TODO: Change text
+            #emotion_profile_text = "Conflicting emotional signals across modalities." # TODO: Change text
+            pending_conflict_resolution = True
 
         # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
         else:
             final_emotion, fused_dist, weights = fuse_modalities(modalities)
+
+            final_score = fused_dist.get(final_emotion, 0.0)
 
             emotion_profile = [f"- Final emotion (fused): {final_emotion}"]
 
@@ -380,7 +491,7 @@ if __name__ == "__main__":
                     f"(weight={weights[m]:.2f})"
                 )
 
-            emotion_profile_text = "\n".join(emotion_profile)
+            #emotion_profile_text = "\n".join(emotion_profile)
 
         # --- 5. RETRIEVE SIMILAR PAST PROMPTS FROM CHROMA ---
         t0 = time.time()
@@ -393,7 +504,7 @@ if __name__ == "__main__":
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
         agent_reply = generate_agent_reply(transcription, helper_events, top_3_text, arousal,
-                                            valence, dominance, top_face_emo, avg_emotions, chat_history, decision, emotion_profile_text)
+                                            valence, dominance, top_face_emo, avg_emotions, chat_history, decision)
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
@@ -402,14 +513,18 @@ if __name__ == "__main__":
         save_debug_frames(video_frames, turn_counter)
 
         # --- 7. STORE IN CHROMA ---
-        emotions_record = {
-            **{f"text_{res['label']}": float(res['score']) for res in all_text_emotions},
-            "audio_arousal": audio_top,
-            "face_dominant": top_face_emo,
-            **{f"face_{emo}": float(score) for emo, score in avg_emotions.items()},
-        }
-        db.add(transcription, emotions_record)
-        print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
+        if final_emotion is not None and not pending_conflict_resolution:
+            emotions_record = {
+                "final_emotion": final_emotion,
+                "final_score": float(final_score) if final_score else 1.0,
+                "decision": decision,
+            }
+            
+            db.add(transcription, emotions_record)
+            print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
+            print(f"Stored FINAL emotion in Chroma → {final_emotion} ({final_score:.2f})")
+        else:
+            print("Skipping DB storage (no resolved emotion)")
 
         # --- PRINT LATENCY REPORT ---
         print("\n" + "="*60)

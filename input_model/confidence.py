@@ -1,7 +1,8 @@
-CONFIDENCE_THRESHOLD = 0.15
+CONFIDENCE_THRESHOLD_DIFFERENCE = 0.15
+CONFIDENCE_THRESHOLD = 0.4
 
 # Checks if the emotion distribution is confident enough based on top1-top2 difference.
-def is_confident(emotion_dict, threshold=CONFIDENCE_THRESHOLD):
+def is_confident(emotion_dict):
     if not emotion_dict:
         return False, None, 0.0, 0.0
 
@@ -16,6 +17,6 @@ def is_confident(emotion_dict, threshold=CONFIDENCE_THRESHOLD):
     top2_label, top2_score = sorted_emotions[1]
 
     diff = top1_score - top2_score
-    confident = diff >= threshold
+    confident = (top1_score >= CONFIDENCE_THRESHOLD) and (diff >= CONFIDENCE_THRESHOLD_DIFFERENCE)
 
     return confident, top1_label, top1_score, diff
