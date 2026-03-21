@@ -139,23 +139,22 @@ def generate_angent_reply(transcription, helper_events, top_3_text, arousal, val
         )
         past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')
     past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
-    
-    
+
     print('\n📚 Past similar prompts with emotional context:\n' + past_context)
-    # We inject the actual scores into the prompt so Llama knows exactly how you feel!
     
-    system_prompt = f"""
-    The user just said: "{transcription}"
-
-    Here is the user's hidden emotional profile:
-    - Their face looks mostly: {top_face_emo}
-    - Their text implies: {top_3_text[0][0]} and {top_3_text[1][0]}
-    - Their voice energy (Arousal) is: {arousal:.2f}
-
-    Previous similar things they said (with their emotional state at the time): {past_context}
+    # Pack everything securely into the USER message
+    contextual_user_message = f"""
+    [Hidden Context for Agent]
+    - User Face: {top_face_emo}
+    - User Text implies: {top_3_text[0][0]} and {top_3_text[1][0]}
+    - User Voice energy (Arousal): {arousal:.2f}
+    - Past Similar Events: {past_context}
+    
+    User Said: "{transcription}"
     """
     
-    chat_history.append({"role": "assistant", "content": system_prompt})
+    # 1. Append the packaged message as the USER
+    chat_history.append({"role": "user", "content": contextual_user_message})
     
     payload = {
         "model": "qwen3.5:4b", 
@@ -166,10 +165,16 @@ def generate_angent_reply(transcription, helper_events, top_3_text, arousal, val
     
     try:
         response = requests.post(OLLAMA_URL, json=payload)
-        agent_reply = response.json().get("response", "Error generating response.")
+        agent_reply = response.json().get("message", {}).get("content", "Error generating response.")
     except Exception as e:
         agent_reply = "Could not connect to local Ollama LLM."
+        
+    # 2. Append the actual agent reply as the ASSISTANT so it remembers the conversation
+    if agent_reply != "Error generating response." and agent_reply != "Could not connect to local Ollama LLM.":
+        chat_history.append({"role": "assistant", "content": agent_reply})
+        
     return agent_reply
+
 
 if __name__ == "__main__":
     print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
@@ -224,8 +229,6 @@ if __name__ == "__main__":
         if not transcription:
             print("⚠️ Whisper didn't hear any words. Try speaking louder.")
             continue
-        
-        chat_history.append({"role": "user", "content": transcription})
 
         
         # 2. TEXT EMOTION (RoBERTa)
@@ -247,7 +250,7 @@ if __name__ == "__main__":
         helper_events = db.query(transcription, n_results=3)
         
         # --- 6. THE LLM DIALOG MANAGER ---
-        agent_reply = generate_angent_reply(transcription, helper_events, top_3_text, arousal,
+        agent_reply = generate_agent_reply(transcription, helper_events, top_3_text, arousal,
                                             valence, dominance, top_face_emo, avg_emotions, chat_history)
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
