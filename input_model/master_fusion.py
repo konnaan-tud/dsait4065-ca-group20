@@ -102,9 +102,6 @@ def process_audio(audio_data):
         
     print("\n✅ Recording stopped.")
     is_recording = False
-    print("\nProcessing Turn and Benchmarking Latency... Please wait.")
-    full_audio = np.concatenate(audio_data, axis=0)
-    sf.write(AUDIO_FILE, full_audio, SAMPLE_RATE)
 
 def process_video_frames(video_frames, cap):
     sum_emotions = {'angry': 0, 'disgust': 0, 'fear': 0, 'happy': 0, 'sad': 0, 'surprise': 0, 'neutral': 0}
@@ -127,7 +124,7 @@ def process_video_frames(video_frames, cap):
 
     return top_face_emo, avg_emotions, valid_frames
 
-def generate_angent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
+def generate_agent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
                          top_face_emo, avg_emotions, chat_history):
     print("\n🧠 Sending profile to LLM...")
 
@@ -215,11 +212,16 @@ if __name__ == "__main__":
         
         process_audio(audio_data)
         
+        vt.join(timeout=2.0)
+
         if len(audio_data) == 0:
             print("⚠️ No audio detected. Try again.")
             continue
             
-        vt.join(timeout=2.0)
+        # MOVED THIS HERE: Now it is completely safe from crashing!
+        print("\nProcessing Turn... Please wait.")
+        full_audio = np.concatenate(audio_data, axis=0)
+        sf.write(AUDIO_FILE, full_audio, SAMPLE_RATE)
         
         # --- RUN THE CLASSIFIERS (WITH TIMERS) ---
         
@@ -247,7 +249,10 @@ if __name__ == "__main__":
         top_face_emo, avg_emotions, valid_frames = process_video_frames(video_frames, cap)
         
         # --- 5. RETRIEVE SIMILAR PAST PROMPTS FROM CHROMA ---
-        helper_events = db.query(transcription, n_results=3)
+        try:
+            helper_events = db.query(transcription, n_results=3)
+        except Exception:
+            helper_events = [] # Failsafe if the database is empty on turn 1
         
         # --- 6. THE LLM DIALOG MANAGER ---
         agent_reply = generate_agent_reply(transcription, helper_events, top_3_text, arousal,
