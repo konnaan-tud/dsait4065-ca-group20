@@ -20,7 +20,6 @@ SAMPLE_RATE = 16000
 OLLAMA_URL = "http://localhost:11434/api/generate"
 CONFIDENCE_THRESHOLD = 0.15 # to test
 
-# Global state
 is_recording = False
 video_frames = []
 audio_data = []
@@ -29,16 +28,8 @@ print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)..
 cap = cv2.VideoCapture(0)
 time.sleep(1)
 
-# ---------------------------------------------------------
-# CONFIDENCE CHECK FUNCTION
-# ---------------------------------------------------------
-
+# Checks if the emotion distribution is confident enough based on top1-top2 difference.
 def is_confident(emotion_dict, threshold=CONFIDENCE_THRESHOLD):
-    """
-    Checks if the emotion distribution is confident enough
-    based on top1-top2 margin.
-    """
-
     if not emotion_dict:
         return False, None, 0.0, 0.0
 
@@ -55,33 +46,21 @@ def is_confident(emotion_dict, threshold=CONFIDENCE_THRESHOLD):
 
     return confident, top1_label, top1_score, diff
 
-
-# ---------------------------------------------------------
-# VIDEO RECORDER THREAD
-# ---------------------------------------------------------
-
+# --- 1. THREAD: VIDEO RECORDER ---
 def record_video():
     global is_recording, video_frames, cap
     last_capture_time = 0
-
     while is_recording:
-
         ret, frame = cap.read()
-
         if ret:
             current_time = time.time()
-
             if current_time - last_capture_time >= 1.0:
                 video_frames.append(frame.copy())
                 last_capture_time = current_time
+        time.sleep(0.1) 
 
-        time.sleep(0.1)
 
-
-# ---------------------------------------------------------
-# AUDIO RECORDER
-# ---------------------------------------------------------
-
+# --- 2. THREAD: AUDIO RECORDER ---
 def audio_callback(indata, frames, time, status):
     if is_recording:
         audio_data.append(indata.copy())
@@ -99,23 +78,18 @@ print("  -> Loading Audeering Prosodic Emotions...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
 
-
-# ---------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------
+print("\n" + "="*60)
+print("✅ SYSTEM READY. Awaiting your turn.")
+print("="*60 + "\n")
 
 if __name__ == "__main__":
-
     input("🎤 Press [ENTER] to start your turn...")
-
     is_recording = True
     video_frames = []
     audio_data = []
-
     prosodic_predictor = ProsodyEmotionPredictor(device=device)
-
     vad_mapper = VADEmotionMapper(
-        prototypes=load_vad_prototypes(os.path.join(os.path.dirname(__file__), "prosodic_modality", "vad_mapping.csv")),
+        prototypes=load_vad_prototypes(os.path.join(os.path.dirname(__file__), "prosodic_modality", "vad_mapping.csv")), # prototypes=load_vad_prototypes("vad_mapping.csv"),
         weights=(1.0,1.0,1.0),
         temperature=0.25
     )
@@ -125,137 +99,84 @@ if __name__ == "__main__":
     vt.start()
 
     try:
-
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=audio_callback):
-
             print("\n🔴 Recording! Speak naturally.")
             print("🛑 Press [Ctrl+C] when finished...")
-
             while True:
                 time.sleep(0.1)
-
     except KeyboardInterrupt:
-
         print("\n\n✅ Recording stopped.")
         is_recording = False
 
     vt.join(timeout=2.0)
 
-    print("\nProcessing Turn...")
-
+    print("\nProcessing Turn and Benchmarking Latency... Please wait.")
     full_audio = np.concatenate(audio_data, axis=0)
     sf.write(AUDIO_FILE, full_audio, SAMPLE_RATE)
 
-    # ---------------------------------------------------------
-    # 1. SPEECH TO TEXT
-    # ---------------------------------------------------------
-
+    # --- RUN THE CLASSIFIERS (WITH TIMERS) ---
+    
+    # 1. TEXT TRANSLATION (Whisper)
     t0 = time.time()
-
     transcription = stt_pipeline(AUDIO_FILE)["text"].strip()
-
     time_whisper = time.time() - t0
 
-
-    # ---------------------------------------------------------
-    # 2. TEXT EMOTION
-    # ---------------------------------------------------------
-
+    # 2. TEXT EMOTION (RoBERTa)
     t0 = time.time()
-
     text_results = text_emotion_pipeline(transcription)[0]
-
     text_emotions = {res["label"]: res["score"] for res in text_results}
 
     text_confident, text_top, text_score, text_diff = is_confident(text_emotions)
 
     top_3_text = [(res["label"], res["score"]) for res in text_results[:3]]
-
     time_roberta = time.time() - t0
 
-
-    # ---------------------------------------------------------
-    # 3. PROSODIC EMOTION
-    # ---------------------------------------------------------
-
+    # 3. PROSODIC EMOTION (Audeering)
     t0 = time.time()
 
-    signal = torch.from_numpy(
-        librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0]
-    )[None,:]
-
+    signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
     with torch.no_grad():
         logits = audeering_model(signal.to(device))
-
-    arousal, dominance, valence = (
-        logits[0,0].item(),
-        logits[0,1].item(),
-        logits[0,2].item()
-    )
-
+    arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
     ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
 
     audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs)
-
     time_audeering = time.time() - t0
 
-
-    # ---------------------------------------------------------
-    # 4. FACIAL EMOTION
-    # ---------------------------------------------------------
-
+    # 4. FACIAL EMOTION (DeepFace)
     t0 = time.time()
-
-    sum_emotions = {
-        "angry":0,"disgust":0,"fear":0,
-        "happy":0,"sad":0,"surprise":0,"neutral":0
-    }
-
+    sum_emotions = {'angry': 0, 'disgust': 0, 'fear': 0, 'happy': 0, 'sad': 0, 'surprise': 0, 'neutral': 0}
     valid_frames = 0
 
     for frame in video_frames:
-
         try:
-
-            res = DeepFace.analyze(
-                img_path=frame,
-                actions=["emotion"],
-                enforce_detection=False
-            )[0]
+            res = DeepFace.analyze(img_path=frame, actions=["emotion"], enforce_detection=False)[0]
 
             for emo,score in res["emotion"].items():
                 sum_emotions[emo]+=score
 
             valid_frames+=1
-
         except:
             continue
 
     if valid_frames>0:
-
         avg_emotions={emo:score/valid_frames for emo,score in sum_emotions.items()}
 
         total=sum(avg_emotions.values())
         avg_emotions={emo:score/total for emo,score in avg_emotions.items()}
 
         face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions)
-
     else:
-
         avg_emotions=sum_emotions
         face_confident=False
         top_face_emo="No face detected"
         face_diff=0
-
     time_deepface = time.time() - t0
 
     cap.release()
 
-
-    # ---------------------------------------------------------
-    # BUILD MODALITIES (ONLY CONFIDENT ONES)
-    # ---------------------------------------------------------
-
+    # Define which modalities will be considered in the final output.
+    # In case a modality is not confident is excluded from the final result.
     modalities = {}
 
     if text_confident:
@@ -279,11 +200,7 @@ if __name__ == "__main__":
             "confidence": face_score
         }
 
-
-    # ---------------------------------------------------------
-    # AGREEMENT FUNCTION
-    # ---------------------------------------------------------
-
+    # Defines agreement and detects conflict
     def analyze_agreement(modalities):
 
         if len(modalities) == 0:
@@ -297,18 +214,13 @@ if __name__ == "__main__":
 
         if max_count == len(modalities):
             return "full_agreement", dominant
-        elif max_count >= 2:
+        elif max_count == 2:
             return "partial_agreement", dominant
         else:
             return "conflict", None
 
-
-    # ---------------------------------------------------------
-    # FUSION FUNCTION
-    # ---------------------------------------------------------
-
+    # Applies weighted linear fusion
     def fuse_modalities(modalities):
-
         emotions = list(next(iter(modalities.values()))["probs"].keys())
 
         c = {m: modalities[m]["confidence"] for m in modalities}
@@ -328,22 +240,18 @@ if __name__ == "__main__":
         return final_emotion, fused, weights
 
 
-    # ---------------------------------------------------------
-    # DECISION LOGIC
-    # ---------------------------------------------------------
+    # Define prompts for each case
 
     decision, agreed_emotion = analyze_agreement(modalities)
 
     # CASE 0: No confident modality
     if decision == "no_data":
-
         final_emotion = None
-        emotion_profile_text = "No confident emotional signal detected."
+        emotion_profile_text = "No confident emotional signal detected." # TODO: Change text
 
 
     # CASE 1: ONLY ONE CONFIDENT MODALITY  🔥 (NEW RULE)
     elif len(modalities) == 1:
-
         m_name = list(modalities.keys())[0]
         m = modalities[m_name]
 
@@ -352,19 +260,15 @@ if __name__ == "__main__":
         emotion_profile_text = (
             f"- Single confident modality used: {m_name}\n"
             f"- Detected emotion: {final_emotion}"
-        )
-
+        ) # TODO: Change text
 
     # CASE 2: CONFLICT (ALL DIFFERENT)
     elif decision == "conflict":
-
         final_emotion = None
-        emotion_profile_text = "Conflicting emotional signals across modalities."
+        emotion_profile_text = "Conflicting emotional signals across modalities." # TODO: Change text
 
-
-    # CASE 3: AGREEMENT → FUSION
+    # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
     else:
-
         final_emotion, fused_dist, weights = fuse_modalities(modalities)
 
         emotion_profile = [f"- Final emotion (fused): {final_emotion}"]
@@ -377,11 +281,7 @@ if __name__ == "__main__":
 
         emotion_profile_text = "\n".join(emotion_profile)
 
-
-    # ---------------------------------------------------------
-    # LLM PROMPT
-    # ---------------------------------------------------------
-
+    # --- 5. THE LLM DIALOG MANAGER ---
     print("\n🧠 Sending profile to Llama...")
 
     if decision == "conflict":
@@ -432,10 +332,8 @@ if __name__ == "__main__":
     except Exception as e: 
         agent_reply = f"Could not connect: {e}" 
         time_llm = time.time() - t0
-    # ---------------------------------------------------------
-    # OUTPUT
-    # ---------------------------------------------------------
-
+        
+    # --- FINAL OUTPUT ---
     print("\n" + "="*60)
     print("🤖 AGENT RESPONSE")
     print("="*60)
