@@ -19,7 +19,6 @@ from datetime import datetime
 from transformers import pipeline
 from deepface import DeepFace
 from test_audeering import Wav2Small 
-import os
 import sys
 from database import PromptDatabase
 
@@ -153,7 +152,7 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
     chat_history.append({"role": "user", "content": contextual_user_message})
     
     payload = {
-        "model": "qwen3.5:4b", 
+        "model": "llama3", 
         "messages": chat_history,
         "stream": False,
         "think": False
@@ -182,7 +181,7 @@ if __name__ == "__main__":
     chat_history = [
         {
             "role": "system", 
-            "content": """You are an empathetic conversational agent. Your goal is to establish "common ground" with the user. The user is going to tell you about an emotional event.  Use the "explicit confirmation" strategy: acknowledge their feelings, and ask a gentle and simple clarification question to explore the event further. Keep your response strictly under 3 sentences. Also, your question should ask about the event/story to keep the narrative flowing (e.g. "What happened next?", "What did you say to her?", "How did she react when you said that?"). Be warm and conversational. Note: You will be provided with the user's emotional state for each turn. Use this to inform your empathy, but do not explicitly read the exact scores back to the user."""
+            "content": """You are an empathetic conversational agent. Your goal is to establish "common ground" with the user. The user is going to tell you about an emotional event. Use the "explicit confirmation" strategy: acknowledge their feelings, and ask a gentle and simple clarification question to explore the event further. Keep your response strictly under 3 sentences. Also, your question should ask about the event/story to keep the narrative flowing (e.g. "What happened next?", "What did you say to her?", "How did she react when you said that?"). Be warm and conversational. Note: You will be provided with the user's emotional state for each turn. Use this to inform your empathy, but do not explicitly read the exact scores back to the user."""
         }
     ]
     
@@ -225,7 +224,9 @@ if __name__ == "__main__":
         # --- RUN THE CLASSIFIERS (WITH TIMERS) ---
         
         # 1. TEXT TRANSLATION (Whisper)
+        t0 = time.time()
         transcription = stt_pipeline(AUDIO_FILE)["text"].strip()
+        time_whisper = time.time() - t0
         
         if not transcription:
             print("⚠️ Whisper didn't hear any words. Try speaking louder.")
@@ -233,31 +234,40 @@ if __name__ == "__main__":
 
         
         # 2. TEXT EMOTION (RoBERTa)
+        t0 = time.time()
         # Keep ALL 7 results for the database
         all_text_emotions = text_emotion_pipeline(transcription)[0] 
         # Keep only Top 3 for the LLM prompt and printing
         top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
-        
+        time_roberta = time.time() - t0
 
         # 3. PROSODIC EMOTION (Audeering)
+        t0 = time.time()
         signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
         with torch.no_grad():
             logits = audeering_model(signal.to(device))
         arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
+        time_audeering = time.time() - t0
         
         # 4. FACIAL EMOTION (DeepFace)
+        t0 = time.time()
 
         top_face_emo, avg_emotions, valid_frames = process_video_frames(video_frames, cap)
+        time_deepface = time.time() - t0
         
         # --- 5. RETRIEVE SIMILAR PAST PROMPTS FROM CHROMA ---
+        t0 = time.time()
         try:
             helper_events = db.query(transcription, n_results=3)
         except Exception:
             helper_events = [] # Failsafe if the database is empty on turn 1
+        time_db = time.time() - t0
         
         # --- 6. THE LLM DIALOG MANAGER ---
+        t0 = time.time()
         agent_reply = generate_agent_reply(transcription, helper_events, top_3_text, arousal,
                                             valence, dominance, top_face_emo, avg_emotions, chat_history)
+        time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
                         top_face_emo, avg_emotions, valid_frames, agent_reply)
@@ -274,6 +284,21 @@ if __name__ == "__main__":
         }
         db.add(transcription, emotions_record)
         print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
+
+        # --- PRINT LATENCY REPORT ---
+        print("\n" + "="*60)
+        print("⏱️ LATENCY BENCHMARKING REPORT")
+        print("="*60)
+        print(f"  - Whisper (Speech to Text) : {time_whisper:.2f} seconds")
+        print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
+        print(f"  - Audeering (Audio Emotion): {time_audeering:.2f} seconds")
+        print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
+        print(f"  - ChromaDB (Memory Fetch)  : {time_db:.2f} seconds")
+        print(f"  - LLM Generation           : {time_llm:.2f} seconds")
+        print(f"  -------------------------------------------")
+        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm
+        print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
+        print("="*60 + "\n")
         
         turn_counter += 1
         
