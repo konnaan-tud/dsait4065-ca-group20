@@ -1,10 +1,2 @@
-.env
-venv/
-memo_env/
-
-
-**/__pycache__/
-/.venv/
-
-**/debug_frames/
-**/*.wav
+.DS_Store
+.bin
