@@ -203,8 +203,8 @@ def process_video_frames(video_frames, cap):
 
     return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
-def generate_agent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
-                         top_face_emo, avg_emotions, chat_history, decision, emotion_profile_text):
+def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top,
+                         final_emotion, chat_history, decision, emotion_profile_text):
     print("\n🧠 Sending profile to LLM...")
 
     past_context_lines = []
@@ -217,7 +217,6 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
     past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
 
     print('\n📚 Past similar prompts with emotional context:\n' + past_context)
-
     if decision == "conflict":
         contextual_user_message = f"""
         [Hidden Context for Agent]
@@ -258,7 +257,7 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
 
     else:
 
-        contextual_user_message = contextual_user_message = f"""
+        contextual_user_message = f"""
         [Hidden Context for Agent]
 
         User message: "{transcription}"
@@ -268,7 +267,7 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
 
         Instructions for the assistant:
         - You are an empathetic conversational agent.
-        - Acknowledge the user's feelings.
+        - Start by acknowledging the emotion explicitly.
         - Respond naturally in 2–3 sentences.
         - Ask one gentle follow-up question about the event.
         - Do NOT repeat previous responses.
@@ -383,20 +382,34 @@ if __name__ == "__main__":
 
             db.add(transcription, emotions_record)
 
-            chat_history.append({
-                "role": "system",
-                "content": f"[Resolved user emotion: {final_emotion}]"
-            })
+            emotion_profile_text = f"The user confirmed they are feeling {final_emotion}."
 
             print(f"💾 Stored resolved emotion → {final_emotion} ({final_score:.2f})")
+            
+            # fetch similar past events from db (once refactored call the function here)
+            try:
+                helper_events = db.query(transcription, n_results=3)
+            except Exception:
+                helper_events = []
 
             pending_conflict_resolution = False
-            
-            # Now generate a NORMAL agent response using resolved emotion
-            decision = "resolved"
+            agent_reply = generate_agent_reply(
+                transcription,
+                helper_events=helper_events,
+                top_face_emo=None,
+                text_top=final_emotion,
+                audio_top=None,
+                final_emotion=final_emotion,
+                chat_history=chat_history,
+                decision="resolved",
+                emotion_profile_text=emotion_profile_text
+            )
 
-            #emotion_profile_text = f"User clarified emotion: {final_emotion}"
-    
+            print(f"💬 Agent: {agent_reply}")
+
+            turn_counter += 1
+            continue 
+
         # 2. TEXT EMOTION (RoBERTa)
         t0 = time.time()
         # Keep ALL 7 results for the database
@@ -505,8 +518,7 @@ if __name__ == "__main__":
 
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
-        agent_reply = generate_agent_reply(transcription, helper_events, top_3_text, arousal,
-                                            valence, dominance, top_face_emo, avg_emotions_norm, chat_history, decision, emotion_profile_text)
+        agent_reply = generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top, final_emotion, chat_history, decision, emotion_profile_text)
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
