@@ -197,15 +197,14 @@ def process_video_frames(video_frames, cap):
 
         face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions_norm)
     else:
-        avg_emotions=sum_emotions
         face_confident=False
         top_face_emo="No face detected"
         face_diff=0
 
-    return top_face_emo, avg_emotions, valid_frames, face_confident, face_score, face_diff
+    return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
 def generate_agent_reply(transcription, helper_events, top_3_text, arousal, valence, dominance,
-                         top_face_emo, avg_emotions, chat_history, decision):
+                         top_face_emo, avg_emotions, chat_history, decision, emotion_profile_text):
     print("\n🧠 Sending profile to LLM...")
 
     past_context_lines = []
@@ -224,6 +223,7 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
         [Hidden Context for Agent]
 
         User message: "{transcription}"
+        User emotional profile: "{emotion_profile_text}"
 
         Emotion signals detected by the system:
 
@@ -245,6 +245,7 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
         [Hidden Context for Agent]
 
         User message: "{transcription}"
+        User emotional profile: "{emotion_profile_text}"
 
         No clear emotional signal was detected.
 
@@ -261,6 +262,7 @@ def generate_agent_reply(transcription, helper_events, top_3_text, arousal, vale
         [Hidden Context for Agent]
 
         User message: "{transcription}"
+        User emotional profile: "{emotion_profile_text}"
 
         Detected emotional state: {final_emotion if final_emotion else "uncertain"}
 
@@ -399,8 +401,8 @@ if __name__ == "__main__":
         t0 = time.time()
         # Keep ALL 7 results for the database
         all_text_emotions = text_emotion_pipeline(transcription)[0] 
-        text_emotions = {normalize_emotion(res["label"]): res["score"] for res in all_text_emotions}
-        text_confident, text_top, text_score, text_diff = is_confident(text_emotions)
+        text_emotions_norm = {normalize_emotion(res["label"]): res["score"] for res in all_text_emotions}
+        text_confident, text_top, text_score, text_diff = is_confident(text_emotions_norm)
         # Keep only Top 3 for the LLM prompt and printing
         top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
         time_roberta = time.time() - t0
@@ -419,7 +421,7 @@ if __name__ == "__main__":
         
         # 4. FACIAL EMOTION (DeepFace)
         t0 = time.time()
-        top_face_emo, avg_emotions, valid_frames, face_confident, face_score, face_diff = process_video_frames(video_frames, cap)
+        top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff = process_video_frames(video_frames, cap)
         time_deepface = time.time() - t0
 
         # Define which modalities will be considered in the final output.
@@ -428,21 +430,21 @@ if __name__ == "__main__":
 
         if text_confident:
             modalities["text"] = {
-                "probs": text_emotions,
+                "probs": text_emotions_norm,
                 "top": text_top,
                 "confidence": text_score
             }
 
         if audio_confident:
             modalities["audio"] = {
-                "probs": ekman_probs,
+                "probs": ekman_probs_norm,
                 "top": audio_top,
                 "confidence": audio_score
             }
 
         if face_confident:
             modalities["face"] = {
-                "probs": avg_emotions,
+                "probs": avg_emotions_norm,
                 "top": top_face_emo,
                 "confidence": face_score
             }
@@ -455,7 +457,7 @@ if __name__ == "__main__":
 
         # CASE 0: No confident modality
         if decision == "no_data":
-            emotion_profile_text = "No confident emotional signal detected." # TODO: Change text
+            emotion_profile_text = "No confident emotional signal detected."
 
 
         # CASE 1: ONLY ONE CONFIDENT MODALITY  🔥 (NEW RULE)
@@ -466,15 +468,15 @@ if __name__ == "__main__":
             final_emotion = m["top"]
             final_score = m["confidence"]
 
-            #emotion_profile_text = (
-            #    f"- Single confident modality used: {m_name}\n"
-            #    f"- Detected emotion: {final_emotion}"
-            #) 
+            emotion_profile_text = (
+                f"- Single confident modality used: {m_name}\n"
+                f"- Detected emotion: {final_emotion}"
+            ) 
 
         # CASE 2: CONFLICT (ALL DIFFERENT)
         elif decision == "conflict":
             final_emotion = None
-            #emotion_profile_text = "Conflicting emotional signals across modalities." # TODO: Change text
+            emotion_profile_text = "Conflicting emotional signals across modalities."
             pending_conflict_resolution = True
 
         # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
@@ -491,7 +493,7 @@ if __name__ == "__main__":
                     f"(weight={weights[m]:.2f})"
                 )
 
-            #emotion_profile_text = "\n".join(emotion_profile)
+            emotion_profile_text = "\n".join(emotion_profile)
 
         # --- 5. RETRIEVE SIMILAR PAST PROMPTS FROM CHROMA ---
         t0 = time.time()
@@ -504,11 +506,11 @@ if __name__ == "__main__":
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
         agent_reply = generate_agent_reply(transcription, helper_events, top_3_text, arousal,
-                                            valence, dominance, top_face_emo, avg_emotions, chat_history, decision)
+                                            valence, dominance, top_face_emo, avg_emotions_norm, chat_history, decision, emotion_profile_text)
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
-                        top_face_emo, avg_emotions, valid_frames, agent_reply, text_confident, 
+                        top_face_emo, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
 
