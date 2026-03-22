@@ -22,7 +22,7 @@ from prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
 from prosodic_modality.test_audeering import Wav2Small 
 from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
 
-from confidence import is_confident
+from confidence import is_confident, prune_low_confidence_modalities
 from agreement import analyze_agreement
 from fusion import fuse_modalities
 
@@ -564,6 +564,9 @@ if __name__ == "__main__":
                 "top": top_face_emo,
                 "confidence": face_score
             }
+        
+        # Remove outliers
+        modalities = prune_low_confidence_modalities(modalities)
 
         # Define prompts for each case
         decision, agreed_emotion = analyze_agreement(modalities)
