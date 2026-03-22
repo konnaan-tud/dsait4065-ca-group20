@@ -63,6 +63,19 @@ def normalize_emotion(label):
 
     return mapping.get(label.lower(), label.lower())
 
+# Penalizes neutral emotions
+def penalize_neutral(emotions, penalty=0.5):
+    adjusted = emotions.copy()
+
+    if "neutral" in adjusted:
+        adjusted["neutral"] *= penalty
+
+    total = sum(adjusted.values())
+    if total > 0:
+        adjusted = {k: v / total for k, v in adjusted.items()}
+
+    return adjusted
+
 # extract user emotion
 def extract_explicit_emotion(text):
     text = text.lower()
@@ -96,7 +109,7 @@ def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
 
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
-                       ekman_probs, avg_emotions, valid_frames, agent_reply, text_confident, 
+                       ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff):
         print("\n" + "="*60)
         print("🤖 AGENT RESPONSE")
@@ -113,7 +126,7 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
         print(f"   Arousal: {arousal:.2f}")
         print(f"   Valence: {valence:.2f}")
         print(f"   Dominance: {dominance:.2f}")
-        print(f"   Ekman: {ekman_probs}")
+        print(f"   Ekman: {ekman_probs_norm}")
 
         print("\n🎭 VIDEO MODALITY:")
         if valid_frames>0:
@@ -243,6 +256,9 @@ def process_video_frames(video_frames, cap):
         avg_emotions={emo:score/total for emo,score in avg_emotions.items()}
 
         avg_emotions_norm = {normalize_emotion(k): v for k, v in avg_emotions.items()}
+
+        # Penalize neutral for facial emotion
+        avg_emotions_norm = penalize_neutral(avg_emotions_norm, penalty=0.5)
 
         face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions_norm)
     else:
@@ -513,6 +529,9 @@ if __name__ == "__main__":
         ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
+        # Penalize neutral for prosody
+        ekman_probs_norm = penalize_neutral(ekman_probs_norm, penalty=0.5)
+
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
         time_audeering = time.time() - t0
         
@@ -606,7 +625,7 @@ if __name__ == "__main__":
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
-                        top_face_emo, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
+                        ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
 
