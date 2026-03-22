@@ -37,6 +37,11 @@ CONFIDENCE_THRESHOLD = 0.15 # to test
 
 is_recording = False
 
+# --- HYBRID MEMORY STATE VARIABLES ---
+narrative_summary = ""
+summary_lock = threading.Lock()
+turns_for_summary = [] # Buffer to hold the recent turns before summarizing
+
 # Maps modalities apparently not all modalities have the same name for emotions
 def normalize_emotion(label):
     mapping = {
@@ -128,6 +133,50 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
         for name, m in modalities.items():
             print(f" - {name}: {m['top']} (confidence={m['confidence']:.2f})")
 
+# --- HYBRID MEMORY: ASYNCHRONOUS RUNNING SUMMARY ---
+def update_running_summary(recent_turns, current_summary):
+    global narrative_summary
+    print("\n🔄 [Semantic Memory] Background thread summarizing recent turns...")
+    
+    transcript = "\n".join(recent_turns)
+    
+    prompt = f"""
+    You are managing the Semantic Memory for an empathetic AI agent. 
+    Update the user's psychological profile based on the new dialogue.
+
+    You MUST structure your response EXACTLY in these two bulleted sections:
+    1. Core Facts & Context: (Preserve specific details, nouns, and events mentioned by the user. Add new facts without deleting important old ones. Maximum 4 bullet points).
+    2. Emotional Trajectory: (Analyze how their mood or core struggle is shifting right now. Maximum 2 bullet points).
+    
+    IMPORTANT: Output ONLY the two bulleted sections. Do not include introductory phrases like "Here is the summary".
+    
+    Previous Profile:
+    {current_summary if current_summary else "None (Beginning of conversation)"}
+    
+    New Dialogue:
+    {transcript}
+    """
+
+    payload = {
+        "model": "llama3", 
+        "messages": [{"role": "system", "content": prompt}],
+        "stream": False,
+        "think": False
+    }
+    
+    try:
+        t0_summary = time.time()
+        response = requests.post(OLLAMA_URL, json=payload)
+        time_summary = time.time() - t0_summary
+        
+        new_summary = response.json().get("message", {}).get("content", "").strip()
+        if new_summary:
+            with summary_lock:
+                narrative_summary = new_summary
+            print(f"\n✅ [Semantic Memory] Running Summary Updated in Background! (Latency: {time_summary:.2f} seconds)")
+    except Exception as e:
+        print(f"\n⚠️ [Semantic Memory] Summary update failed: {e}")
+
 # --- 1. THREAD: VIDEO RECORDER ---
 def record_video(frames, cap):
     global is_recording
@@ -207,6 +256,8 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
                          final_emotion, chat_history, decision, emotion_profile_text):
     print("\n🧠 Sending profile to LLM...")
 
+    with summary_lock:
+        current_summary = narrative_summary
     past_context_lines = []
     for e in helper_events:
         emotions = e.get("emotions") or {}
@@ -217,6 +268,24 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
     past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
 
     print('\n📚 Past similar prompts with emotional context:\n' + past_context)
+    if current_summary:
+        print(f'\n🧠 Current Semantic Summary:\n  {current_summary}')
+
+    # --- DYNAMIC SYSTEM PROMPT INJECTION ---
+    base_system = """You are an empathetic, human-like conversational partner. Your goal is to establish "common ground" with the user regarding their emotional story. 
+    
+    CRITICAL RULES:
+    1. Acknowledge their situation gracefully, but NEVER use the exact emotion labels provided in your hidden context (e.g., do not say "You are feeling anger/neutral").
+    2. NEVER start your sentences with cliché therapy phrases like "It sounds like...", "I sense...", or "I hear you saying...". Speak naturally like a friend.
+    3. Ask one gentle and simple clarification question to keep the narrative flowing.
+    4. Keep your response strictly under 3 sentences."""
+    
+    summary_injection = f"\n\n[Running Summary (Semantic Memory)]:\n{current_summary}" if current_summary else ""
+    instruction_injection = "\n\nInstructions: Formulate your next response by connecting their current text to the Running Summary (if available) to show you understand the bigger picture."
+    
+    chat_history[0]["content"] = base_system + summary_injection + instruction_injection
+
+    # CONFLICT
     if decision == "conflict":
         contextual_user_message = f"""
         [Hidden Context for Agent]
@@ -231,12 +300,17 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
         - Facial expression suggests: {top_face_emo}
 
         These signals do not agree.
-
-        Instructions:
-        - Briefly explain that the signals are mixed.
-        - Mention the different signals naturally.
+        
+         Instructions:
+        - You are an empathetic agent who is confused by the user's mixed signals.
+        - If you noticed a contrast between the intense words they are using and their calm physical delivery. DO NOT say you are "confused". Instead, show deep empathy for this contrast (e.g., "You are using really intense words, but your voice sounds almost exhausted or numb...").
+        - Point out the contrast briefly and offer them a choice to clarify.
+        - Point this out VERY gently and non-judgmentally, like a caring friend checking in. DO NOT say things like "your face doesn't show emotion" or "your tone is neutral" (that sounds judgmental and creepy).
         - Ask the user how they are actually feeling.
-        - Keep the response under 2 sentences.
+        - Do NOT use robotic words like "modalities", "algorithms", or "text analysis".
+        - Use this style: "You're talking about something really [text_top], but you seem completely [voice_or_face_emo]. Are you actually feeling [text_top], or are you just used to this by now?"
+        - For example: "You are describing something really frustrating, but your voice sounds surprisingly calm. Are you feeling more angry, or just neutral?"
+        - Keep the response under 3 sentences. 
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
@@ -259,24 +333,18 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
 
         contextual_user_message = f"""
         [Hidden Context for Agent]
+        User emotional profile: "{emotion_profile_text}"
+        Detected emotional state: {final_emotion if final_emotion else "uncertain"}
+        Past Similar Events: {past_context}
 
         User message: "{transcription}"
-        User emotional profile: "{emotion_profile_text}"
-
-        Detected emotional state: {final_emotion if final_emotion else "uncertain"}
-
-        Instructions for the assistant:
-        - You are an empathetic conversational agent.
-        - Start by acknowledging the emotion explicitly.
-        - Respond naturally in 2–3 sentences.
-        - Ask one gentle follow-up question about the event.
-        - Do NOT repeat previous responses.
-
-        Write the response.
         """
-
         chat_history.append({"role": "user", "content": contextual_user_message})
     
+    # 💡 Short-Term Memory Sliding Window Buffer
+    if len(chat_history) > 11:
+        chat_history[:] = [chat_history[0]] + chat_history[-10:]
+
     payload = {
         "model": "llama3", 
         "messages": chat_history,
@@ -304,12 +372,7 @@ if __name__ == "__main__":
     stt_pipeline, text_emotion_pipeline, audeering_model, device = model_initialization()
     db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
     
-    chat_history = [
-        {
-            "role": "system", 
-            "content": """You are an empathetic conversational agent. Your goal is to establish "common ground" with the user. The user is going to tell you about an emotional event. Use the "explicit confirmation" strategy: acknowledge their feelings, and ask a gentle and simple clarification question to explore the event further. Keep your response strictly under 3 sentences. Also, your question should ask about the event/story to keep the narrative flowing (e.g. "What happened next?", "What did you say to her?", "How did she react when you said that?"). Be warm and conversational. Note: You will be provided with the user's emotional state for each turn. Use this to inform your empathy, but do not explicitly read the exact scores back to the user."""
-        }
-    ]
+    chat_history = [{"role": "system", "content": "Initializing..."}]
     
     turn_counter = 1
 
@@ -323,8 +386,16 @@ if __name__ == "__main__":
 
         print("\n" + "-"*60)
         user_cmd = input(f"🟢 TURN {turn_counter} | Press [ENTER] to start speaking (or type 'q' to quit): ")
+        
+       # --- SESSION SAVE ON QUIT ---
         if user_cmd.strip().lower() == 'q':
             print("\n👋 Ending conversation. Goodbye!")
+            with summary_lock:
+                if narrative_summary:
+                    filename = f"final_summary_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    with open(filename, 'w') as f:
+                        json.dump({"semantic_summary": narrative_summary}, f, indent=4)
+                    print(f"💾 Saved Final Semantic Summary to {filename}")
             break
         
         is_recording = True
@@ -382,7 +453,7 @@ if __name__ == "__main__":
 
             db.add(transcription, emotions_record)
 
-            emotion_profile_text = f"The user confirmed they are feeling {final_emotion}."
+            emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
             print(f"💾 Stored resolved emotion → {final_emotion} ({final_score:.2f})")
             
@@ -405,7 +476,20 @@ if __name__ == "__main__":
                 emotion_profile_text=emotion_profile_text
             )
 
-            print(f"💬 Agent: {agent_reply}")
+            print(f"\n💬 Agent: {agent_reply}")
+
+            # 💡 FIX: Add the resolution turn to the summary queue before continuing!
+            turns_for_summary.append(f"User: {transcription}\nAgent: {agent_reply}")
+            if len(turns_for_summary) >= 3:
+                with summary_lock:
+                    current_sum = narrative_summary
+                summary_thread = threading.Thread(
+                    target=update_running_summary, 
+                    args=(list(turns_for_summary), current_sum)
+                )
+                summary_thread.daemon = True
+                summary_thread.start()
+                turns_for_summary.clear()
 
             turn_counter += 1
             continue 
@@ -508,7 +592,7 @@ if __name__ == "__main__":
 
             emotion_profile_text = "\n".join(emotion_profile)
 
-        # --- 5. RETRIEVE SIMILAR PAST PROMPTS FROM CHROMA ---
+        # --- 5. EPISODIC MEMORY (CHROMA DB) ---
         t0 = time.time()
         try:
             helper_events = db.query(transcription, n_results=3)
@@ -526,6 +610,19 @@ if __name__ == "__main__":
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
 
+        # --- HYBRID MEMORY: QUEUE FOR SUMMARY ---
+        turns_for_summary.append(f"User: {transcription}\nAgent: {agent_reply}")
+        if len(turns_for_summary) >= 3:
+            with summary_lock:
+                current_sum = narrative_summary
+            summary_thread = threading.Thread(
+                target=update_running_summary, 
+                args=(list(turns_for_summary), current_sum)
+            )
+            summary_thread.daemon = True
+            summary_thread.start()
+            turns_for_summary.clear()
+
         # --- 7. STORE IN CHROMA ---
         if final_emotion is not None and not pending_conflict_resolution:
             emotions_record = {
@@ -533,7 +630,6 @@ if __name__ == "__main__":
                 "final_score": float(final_score) if final_score else 1.0,
                 "decision": decision,
             }
-            
             db.add(transcription, emotions_record)
             print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
             print(f"Stored FINAL emotion in Chroma → {final_emotion} ({final_score:.2f})")
