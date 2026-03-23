@@ -63,20 +63,6 @@ def normalize_emotion(label):
 
     return mapping.get(label.lower(), label.lower())
 
-# Penalizes neutral emotions
-def penalize_neutral(emotions, penalty=0.5):
-    adjusted = emotions.copy()
-
-    if "neutral" in adjusted:
-        adjusted["neutral"] *= penalty
-
-    total = sum(adjusted.values())
-    if total > 0:
-        adjusted = {k: v / total for k, v in adjusted.items()}
-
-    return adjusted
-
-
 def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     results = text_emotion_pipeline(user_reply)[0]
     predicted = max(results, key=lambda x: x["score"])
@@ -231,9 +217,6 @@ def process_video_frames(video_frames, cap):
         avg_emotions={emo:score/total for emo,score in avg_emotions.items()}
 
         avg_emotions_norm = {normalize_emotion(k): v for k, v in avg_emotions.items()}
-
-        # Penalize neutral for facial emotion
-        avg_emotions_norm = penalize_neutral(avg_emotions_norm, penalty=0.3) # keeps only 30% of the original distribution
 
         face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions_norm)
     else:
@@ -501,9 +484,6 @@ if __name__ == "__main__":
         arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
         ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
-
-        # Penalize neutral for prosody
-        ekman_probs_norm = penalize_neutral(ekman_probs_norm, penalty=0.6) # keeps 60% of the original distribution
 
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
         time_audeering = time.time() - t0
