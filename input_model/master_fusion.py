@@ -91,6 +91,39 @@ def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     flat_distribution = {normalize_emotion(res["label"]): res["score"] for res in results}
     return predicted["label"], flat_distribution
 
+def fetch_temporal_memory(db, current_text, current_emotion_dist):
+    """Fetches past events and calculates the MAE emotional contradiction."""
+    memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
+    
+    try:
+        results = db.query(current_text, n_results=1)
+        
+        if results:
+            dist = results[0].get("distance", 999.0)
+            
+            if dist < SEMANTIC_DISTANCE_THRESHOLD:
+                past_event = results[0]
+                p_text = past_event.get("text", "")
+                
+                # Safely unpack the nested dictionary
+                p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
+                p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
+                
+                if p_dist:
+                    emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
+                    # Calculate Mean Absolute Error
+                    mae = sum(abs(current_emotion_dist.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
+                    
+                    memory_data = {
+                        "past_text": p_text,
+                        "mae": mae,
+                        "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
+                        "past_top": p_top
+                    }
+    except Exception as e:
+        pass
+
+    return memory_data
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
                        ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
@@ -357,8 +390,9 @@ def generate_agent_reply(transcription, top_face_emo, text_top, audio_top,
                 memory_injection = f"""
                 [Hidden Memory Context]
                 The user is talking about: "{transcription}" and currently feeling {current_emo}. 
-                However, in the past, when they experienced a very similar event ("{past_text}"), they appeared to feel completely different ({past_emo}). 
-                Strategy: Use explicit confirmation to point out this difference! Gently note that they are reacting differently this time, and ask a curious clarification question to explore why this time feels different to them.
+                However, in the past, when they experienced a very similar event ("{past_text}"), they appeared to feel ({past_emo}). 
+                Strategy: Gently note that they are reacting differently this time compared to the past, and ask a curious clarification question to explore why this time feels different to them.
+                CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Describe the shift using natural, empathetic human language.
                 """
             else:
                 memory_injection = f"""
@@ -367,6 +401,7 @@ def generate_agent_reply(transcription, top_face_emo, text_top, audio_top,
                 In the past, when they experienced a very similar event ("{past_text}"), they felt {past_emo}. 
                 Today, they are feeling the exact same way ({current_emo}). 
                 Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
+                CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Paraphrase their emotional state using natural human language.
                 """
 
         contextual_user_message = f"""
@@ -532,30 +567,7 @@ if __name__ == "__main__":
             print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
             
             # --- EPISODIC MEMORY (RESOLVED DETOUR) ---
-            memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
-            try:
-                results = db.query(transcription, n_results=1)
-                if results and results[0]["distance"] < SEMANTIC_DISTANCE_THRESHOLD:
-                    past_event = results[0]
-                    p_text = past_event.get("text", "")
-                    
-                    # 💡 FIX: Safely unpack the nested dictionary
-                    p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
-                    p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
-                    
-                    if p_dist:
-                        emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
-                        # 💡 FIX: Use final_distribution for the resolved block's math
-                        mae = sum(abs(final_distribution.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
-                        
-                        memory_data = {
-                            "past_text": p_text,
-                            "mae": mae,
-                            "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
-                            "past_top": p_top
-                        }
-            except Exception as e:
-                print(f"Memory Fetch Error: {e}")
+            memory_data = fetch_temporal_memory(db, transcription, final_distribution)
 
             pending_conflict_resolution = False
             agent_reply = generate_agent_reply(
@@ -707,45 +719,11 @@ if __name__ == "__main__":
         # --- 5. EPISODIC MEMORY (CHROMA DB) WITH MAE MATH ---
         t0 = time.time()
         memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
+        
+        # Only fetch memory if we actually have a confident present emotion!
         if final_emotion is not None and fused_dist:
-            print("\n[DEBUG] 🔍 Querying ChromaDB for matches...")
-            try:
-                results = db.query(transcription, n_results=1)
-                print(f"[DEBUG] Raw DB Results: {results}")
-                
-                if results:
-                    dist = results[0].get("distance", 999.0)
-                    print(f"[DEBUG] Top match distance: {dist:.4f} (Threshold is {SEMANTIC_DISTANCE_THRESHOLD})")
-                    
-                    if dist < SEMANTIC_DISTANCE_THRESHOLD:
-                        past_event = results[0]
-                        p_text = past_event.get("text", "")
-                        
-                        # 💡 Safely unpack the nested dictionary
-                        p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
-                        p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
-                        
-                        if p_dist:
-                            emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
-                            mae = sum(abs(fused_dist.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
-                            
-                            memory_data = {
-                                "past_text": p_text,
-                                "mae": mae,
-                                "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
-                                "past_top": p_top
-                            }
-                            print(f"[DEBUG] ✅ Successfully calculated MAE: {mae:.3f}")
-                        else:
-                            print("[DEBUG] ❌ Failed: Retrieved event had no 'emotion_distribution' data.")
-                    else:
-                        print(f"[DEBUG] ❌ Match rejected: Distance {dist:.4f} is >= {SEMANTIC_DISTANCE_THRESHOLD}")
-                else:
-                    print("[DEBUG] ❌ ChromaDB returned an empty list (no results).")
-                    
-            except Exception as e:
-                # This stops the silent failure!
-                print(f"[DEBUG] 🚨 CRITICAL ERROR in Memory Fetch: {e}")
+            memory_data = fetch_temporal_memory(db, transcription, fused_dist)
+            
         time_db = time.time() - t0
 
         # --- 6. THE LLM DIALOG MANAGER ---
