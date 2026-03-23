@@ -21,7 +21,8 @@ from deepface import DeepFace
 from prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
 from prosodic_modality.test_audeering import Wav2Small 
 from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
-
+from TTS.api import TTS
+import subprocess
 from confidence import is_confident, prune_low_confidence_modalities
 from agreement import analyze_agreement
 from fusion import fuse_modalities
@@ -214,7 +215,8 @@ def model_initialization():
     text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
     print("  -> Loading Audeering Prosodic Emotions...")
     audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
-    return stt_pipeline, text_emotion_pipeline, audeering_model, device
+    tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC", progress_bar=False)
+    return stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
     os.makedirs("debug_frames", exist_ok=True)
@@ -381,12 +383,15 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
         
     return agent_reply
 
+def text_to_speech(tts_model, sentence):
+    tts_model.tts_to_file(text=sentence, file_path="output.wav")
+    subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
     print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
     cap = cv2.VideoCapture(0)
     time.sleep(1)
-    stt_pipeline, text_emotion_pipeline, audeering_model, device = model_initialization()
+    stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device = model_initialization()
     db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
     
     chat_history = [{"role": "system", "content": "Initializing..."}]
@@ -493,6 +498,7 @@ if __name__ == "__main__":
             )
 
             print(f"\n💬 Agent: {agent_reply}")
+            text_to_speech(tts_model, agent_reply)
 
             # 💡 FIX: Add the resolution turn to the summary queue before continuing!
             turns_for_summary.append(f"User: {transcription}\nAgent: {agent_reply}")
@@ -634,6 +640,7 @@ if __name__ == "__main__":
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
+        text_to_speech(tts_model, agent_reply)
 
         # --- HYBRID MEMORY: QUEUE FOR SUMMARY ---
         turns_for_summary.append(f"User: {transcription}\nAgent: {agent_reply}")
