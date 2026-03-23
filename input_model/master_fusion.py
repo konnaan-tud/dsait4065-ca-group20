@@ -231,14 +231,14 @@ def generate_agent_reply(transcription, helper_events, modalities,
     print("\n🧠 Sending profile to LLM...")
 
     with summary_lock:
-        current_summary = narrative_summary
-    past_context_lines = []
+        current_summary = narrative_summary        
+    past_context_lines = []           
     for e in helper_events:
         emotions = e.get("emotions") or {}
         emotions_str = ", ".join(
             f"{k}: {v:.2f}" for k, v in emotions.items() if isinstance(v, (int, float))
         )
-        past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')
+        past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')    
     past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
 
     print('\n📚 Past similar prompts with emotional context:\n' + past_context)
@@ -261,7 +261,8 @@ def generate_agent_reply(transcription, helper_events, modalities,
 
     # CONFLICT
     if decision == "conflict":
-        emotions = [f"{name} → {m['top']} ({m['confidence']:.2f})" for name, m in modalities.items()]
+        emotion_labels = [m["top"] for m in modalities.values()]
+        emotion_lines = ", ".join(emotion_labels)
 
         contextual_user_message = f"""
         [Hidden Context for Agent]
@@ -269,21 +270,18 @@ def generate_agent_reply(transcription, helper_events, modalities,
         User message: "{transcription}"
         User emotional profile: "{emotion_profile_text}"
 
-        Emotion signals detected by the system:
-
-        {emotions}
+        Emotions detected: {emotion_lines}
 
         These signals do not agree.
-        
-        Instructions:
-        - You noticed this emotional mismatch. 
-        - Gently and naturally point out the contrast to the user. 
-        - NEVER use robotic system words like "modality", "confident", "fused", "text", or "audio".
-        - YOU MUST USE THE EXACT EMOTION WORDS provided above ({emotions}) in your response. Do not invent synonyms.
-        - Frame the exact words conversationally and empathetically, not judgmentally.
-        - End by warmly asking them to clarify how they are truly feeling underneath. We want them to answer clearly.
-        - Maximum 3 sentences.
 
+        Instructions:
+        - You noticed this emotional mismatch.
+        - Gently and naturally point out the contrast to the user.
+        - Use the emotions provided above ({emotion_lines}) in your response.
+        - Do NOT mention modality names or confidence scores.
+        - Frame the exact emotion words conversationally and empathetically, not judgmentally.
+        - End by warmly asking them to clarify how they are truly feeling underneath.
+        - Maximum 3 sentences.
         """
         print(contextual_user_message)
         chat_history.append({"role": "user", "content": contextual_user_message})
@@ -440,7 +438,6 @@ if __name__ == "__main__":
             agent_reply = generate_agent_reply(
                 transcription,
                 helper_events=helper_events,
-                final_emotion=final_emotion,
                 modalities=modalities,
                 chat_history=chat_history,
                 decision="resolved",
@@ -524,7 +521,6 @@ if __name__ == "__main__":
         decision, agreed_emotion, agreeing_modalities = analyze_agreement(modalities)
 
         final_emotion = None
-        final_score = None
         fused_dist = {}
 
         # CASE 0: No confident modality
@@ -548,7 +544,6 @@ if __name__ == "__main__":
 
         # CASE 2: CONFLICT (ALL DIFFERENT)
         elif decision == "conflict":
-            final_emotion = None
             emotion_profile_text = "Conflicting emotional signals across modalities."
             pending_conflict_resolution = True
 
