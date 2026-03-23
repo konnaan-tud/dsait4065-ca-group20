@@ -36,6 +36,10 @@ SAMPLE_RATE = 16000
 OLLAMA_URL = "http://localhost:11434/api/chat"
 CONFIDENCE_THRESHOLD = 0.15 # to test
 
+# 💡 NEW: Memory Contradiction Settings
+SEMANTIC_DISTANCE_THRESHOLD = 1.1 # Semantic match threshold 
+MEMORY_CONTRADICTION_THRESHOLD = 0.20 # MAE threshold for triggering the Curiosity Prompt
+
 is_recording = False
 last_valid_agent_utterance = ""  # 💡 Added this variable to track the conversation!
 
@@ -83,12 +87,14 @@ def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     results = text_emotion_pipeline(user_reply)[0]
     predicted = max(results, key=lambda x: x["score"])
     
-    return predicted["label"], results # give a higher prediction to the output of the text to emotion model
+    # 💡 FIX: Flatten the list into a dictionary so MAE math works
+    flat_distribution = {normalize_emotion(res["label"]): res["score"] for res in results}
+    return predicted["label"], flat_distribution
 
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
                        ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
-                       text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff):
+                       text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
         print("🤖 AGENT RESPONSE")
         print("="*60)
@@ -122,6 +128,17 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
 
         for name, m in modalities.items():
             print(f" - {name}: {m['top']} (confidence={m['confidence']:.2f})")
+        
+        # 💡 NEW: Cleanly print the Memory Match right here in the final output!
+        if memory_data and memory_data.get("past_text"):
+            print("\n🕰️ TEMPORAL MEMORY CHECK")
+            print(f"Past Event Matched: '{memory_data['past_text']}'")
+            print(f"Past Dominant Emo : {memory_data['past_top']}")
+            print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
+            if memory_data['is_contradiction']:
+                print(f"   ⚠️ Memory vs Present Events Contradiction Detected (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
+            else:
+                print(f"   ✅ Memory & Present Events Alignment Detected (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
 
 # --- HYBRID MEMORY: ASYNCHRONOUS RUNNING SUMMARY ---
 def update_running_summary(recent_turns, current_summary):
@@ -245,23 +262,14 @@ def process_video_frames(video_frames, cap):
 
     return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
-def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top,
-                         final_emotion, chat_history, decision, emotion_profile_text):
+def generate_agent_reply(transcription, top_face_emo, text_top, audio_top,
+                         final_emotion, chat_history, decision, emotion_profile_text, memory_data=None):
     global last_valid_agent_utterance
     print("\n🧠 Sending profile to LLM...")
 
     with summary_lock:
         current_summary = narrative_summary
-    past_context_lines = []
-    for e in helper_events:
-        emotions = e.get("emotions") or {}
-        emotions_str = ", ".join(
-            f"{k}: {v:.2f}" for k, v in emotions.items() if isinstance(v, (int, float))
-        )
-        past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')
-    past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
 
-    print('\n📚 Past similar prompts with emotional context:\n' + past_context)
     if current_summary:
         print(f'\n🧠 Current Semantic Summary:\n  {current_summary}')
 
@@ -337,13 +345,35 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
 
+    # NORMAL FUSION (WITH MEMORY CHECK)
     else:
+        memory_injection = ""
+        if memory_data and memory_data.get("past_text"):
+            past_text = memory_data["past_text"]
+            past_emo = memory_data["past_top"]
+            current_emo = final_emotion
+            
+            if memory_data.get("is_contradiction"):
+                memory_injection = f"""
+                [Hidden Memory Context]
+                The user is talking about: "{transcription}" and currently feeling {current_emo}. 
+                However, in the past, when they experienced a very similar event ("{past_text}"), they appeared to feel completely different ({past_emo}). 
+                Strategy: Use explicit confirmation to point out this difference! Gently note that they are reacting differently this time, and ask a curious clarification question to explore why this time feels different to them.
+                """
+            else:
+                memory_injection = f"""
+                [Hidden Memory Context]
+                The user is talking about: "{transcription}". 
+                In the past, when they experienced a very similar event ("{past_text}"), they felt {past_emo}. 
+                Today, they are feeling the exact same way ({current_emo}). 
+                Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
+                """
 
         contextual_user_message = f"""
         [Hidden Context for Agent]
         User emotional profile: "{emotion_profile_text}"
         Detected emotional state: {final_emotion if final_emotion else "uncertain"}
-        Past Similar Events: {past_context}
+        {memory_injection}
 
         User message: "{transcription}"
         """
@@ -501,24 +531,54 @@ if __name__ == "__main__":
 
             print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
             
-            # fetch similar past events from db (once refactored call the function here)
+            # --- EPISODIC MEMORY (RESOLVED DETOUR) ---
+            memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
             try:
-                helper_events = db.query(transcription, n_results=3)
-            except Exception:
-                helper_events = []
+                results = db.query(transcription, n_results=1)
+                if results and results[0]["distance"] < SEMANTIC_DISTANCE_THRESHOLD:
+                    past_event = results[0]
+                    p_text = past_event.get("text", "")
+                    
+                    # 💡 FIX: Safely unpack the nested dictionary
+                    p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
+                    p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
+                    
+                    if p_dist:
+                        emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
+                        # 💡 FIX: Use final_distribution for the resolved block's math
+                        mae = sum(abs(final_distribution.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
+                        
+                        memory_data = {
+                            "past_text": p_text,
+                            "mae": mae,
+                            "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
+                            "past_top": p_top
+                        }
+            except Exception as e:
+                print(f"Memory Fetch Error: {e}")
 
             pending_conflict_resolution = False
             agent_reply = generate_agent_reply(
-                transcription,
-                helper_events=helper_events,
+                transcription=transcription,
                 top_face_emo=None,
                 text_top=final_emotion,
                 audio_top=None,
                 final_emotion=final_emotion,
                 chat_history=chat_history,
                 decision="resolved",
-                emotion_profile_text=emotion_profile_text
+                emotion_profile_text=emotion_profile_text,
+                memory_data=memory_data
             )
+
+            # 💡 Cleanly print the memory check for resolved turns
+            if memory_data and memory_data.get("past_text"):
+                print("\n🕰️ TEMPORAL MEMORY CHECK (Detour Resolved)")
+                print(f"Past Event Matched: '{memory_data['past_text']}'")
+                print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
+                if memory_data['is_contradiction']:
+                    print(f"Result            : ⚠️ CONTRADICTION (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
+                else:
+                    print(f"Result            : ✅ ALIGNMENT (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
 
             print(f"\n💬 Agent: {agent_reply}")
 
@@ -644,22 +704,68 @@ if __name__ == "__main__":
 
             emotion_profile_text = "\n".join(emotion_profile)
 
-        # --- 5. EPISODIC MEMORY (CHROMA DB) ---
+        # --- 5. EPISODIC MEMORY (CHROMA DB) WITH MAE MATH ---
         t0 = time.time()
-        try:
-            helper_events = db.query(transcription, n_results=3)
-        except Exception:
-            helper_events = [] # Failsafe if the database is empty on turn 1
+        memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
+        if final_emotion is not None and fused_dist:
+            print("\n[DEBUG] 🔍 Querying ChromaDB for matches...")
+            try:
+                results = db.query(transcription, n_results=1)
+                print(f"[DEBUG] Raw DB Results: {results}")
+                
+                if results:
+                    dist = results[0].get("distance", 999.0)
+                    print(f"[DEBUG] Top match distance: {dist:.4f} (Threshold is {SEMANTIC_DISTANCE_THRESHOLD})")
+                    
+                    if dist < SEMANTIC_DISTANCE_THRESHOLD:
+                        past_event = results[0]
+                        p_text = past_event.get("text", "")
+                        
+                        # 💡 Safely unpack the nested dictionary
+                        p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
+                        p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
+                        
+                        if p_dist:
+                            emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
+                            mae = sum(abs(fused_dist.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
+                            
+                            memory_data = {
+                                "past_text": p_text,
+                                "mae": mae,
+                                "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
+                                "past_top": p_top
+                            }
+                            print(f"[DEBUG] ✅ Successfully calculated MAE: {mae:.3f}")
+                        else:
+                            print("[DEBUG] ❌ Failed: Retrieved event had no 'emotion_distribution' data.")
+                    else:
+                        print(f"[DEBUG] ❌ Match rejected: Distance {dist:.4f} is >= {SEMANTIC_DISTANCE_THRESHOLD}")
+                else:
+                    print("[DEBUG] ❌ ChromaDB returned an empty list (no results).")
+                    
+            except Exception as e:
+                # This stops the silent failure!
+                print(f"[DEBUG] 🚨 CRITICAL ERROR in Memory Fetch: {e}")
         time_db = time.time() - t0
 
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
-        agent_reply = generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top, final_emotion, chat_history, decision, emotion_profile_text)
+        agent_reply = generate_agent_reply(
+            transcription=transcription, 
+            top_face_emo=top_face_emo, 
+            text_top=text_top, 
+            audio_top=audio_top, 
+            final_emotion=final_emotion, 
+            chat_history=chat_history, 
+            decision=decision, 
+            emotion_profile_text=emotion_profile_text, 
+            memory_data=memory_data
+        )
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
-                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
+                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data)
         save_debug_frames(video_frames, turn_counter)
 
         # --- HYBRID MEMORY: QUEUE FOR SUMMARY ---
