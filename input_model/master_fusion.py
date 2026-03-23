@@ -5,6 +5,7 @@ transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
 transformers.modeling_utils.check_torch_load_is_safe = lambda: None
 
 import cv2
+import json
 import os
 import sys
 import sounddevice as sd
@@ -36,6 +37,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 CONFIDENCE_THRESHOLD = 0.15 # to test
 
 is_recording = False
+last_valid_agent_utterance = ""  # 💡 Added this variable to track the conversation!
 
 # --- HYBRID MEMORY STATE VARIABLES ---
 narrative_summary = ""
@@ -245,6 +247,7 @@ def process_video_frames(video_frames, cap):
 
 def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top,
                          final_emotion, chat_history, decision, emotion_profile_text):
+    global last_valid_agent_utterance
     print("\n🧠 Sending profile to LLM...")
 
     with summary_lock:
@@ -293,14 +296,29 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
         These signals do not agree.
         
         Instructions:
-        - You noticed this emotional mismatch. 
-        - Gently and naturally point out the contrast to the user. 
+        - Point out this specific contrast to the user gently and casually.
+        - YOU MUST USE the words "{text_top}" and either "{audio_top}" or "{top_face_emo}" to describe the contradiction.
         - NEVER use robotic system words like "modality", "confident", "fused", "text", or "audio".
-        - YOU MUST USE THE EXACT EMOTION WORDS provided above ({text_top}, {audio_top}, {top_face_emo}) in your response. Do not invent synonyms.
         - Frame the exact words conversationally and empathetically, not judgmentally.
         - End by warmly asking them to clarify how they are truly feeling underneath. We want them to answer clearly.
         - Maximum 3 sentences.
 
+        """
+        chat_history.append({"role": "user", "content": contextual_user_message})
+    # RESOLVED
+    elif decision == "resolved":
+        contextual_user_message = f"""
+        [Hidden Context for Agent]
+        The user just clarified an emotional contradiction from the previous turn.
+        User's clarification: "{transcription}"
+        User's true emotion: {text_top}
+
+        Instructions:
+        - Briefly validate their true feeling (e.g., "Thank you for clarifying...").
+        - IMPORTANT: We just took a brief detour. You need to return to the conversation. 
+        - The last topic or question you were discussing before the detour was: "{last_valid_agent_utterance}"
+        - Naturally transition BACK to that topic or continue the thought. 
+        - Keep it seamless and conversational, strictly under 3 sentences.
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
@@ -352,6 +370,9 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
     if agent_reply != "Error generating response." and agent_reply != "Could not connect to local Ollama LLM.":
         chat_history.append({"role": "assistant", "content": agent_reply})
         
+    # Save this reply as the "last valid reply" if it's not a conflict detour
+    if decision != "conflict":
+        last_valid_agent_utterance = agent_reply
     return agent_reply
 
 
@@ -379,14 +400,48 @@ if __name__ == "__main__":
         
        # --- SESSION SAVE ON QUIT ---
         if user_cmd.strip().lower() == 'q':
-            print("\n👋 Ending conversation. Goodbye!")
+            print("\n👋 Wrapping up the conversation... Please wait a moment.")
+            
             with summary_lock:
-                if narrative_summary:
-                    filename = f"final_summary_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                    with open(filename, 'w') as f:
-                        json.dump({"semantic_summary": narrative_summary}, f, indent=4)
-                    print(f"💾 Saved Final Semantic Summary to {filename}")
-            break
+                final_summary = narrative_summary
+                
+            # --- GENERATE THE FINAL GOODBYE MESSAGE ---
+            final_prompt = f"""
+            [Hidden Context for Agent]
+            The user has decided to end the conversation for today.
+            
+            Here is the running summary of their story and emotional journey today:
+            {final_summary if final_summary else "(No summary available, it was a very short chat)."}
+            
+            Instructions:
+            - Act as an empathetic therapist/friend saying goodbye.
+            - Start by saying something like "Thank you so much for sharing all of this with me today."
+            - Translate the summary above into a warm, natural narrative. You must explicitly mention the specific events they went through (the facts) and connect them to how they felt (the emotions).
+            - Validate this specific emotional journey and reassure them.
+            - End with a warm, encouraging sign-off.
+            - Keep it compassionate and natural. Maximum 5 to 6 sentences.
+            """
+            
+            chat_history.append({"role": "user", "content": final_prompt})
+            payload = {"model": "llama3", "messages": chat_history, "stream": False, "think": False}
+            
+            try:
+                response = requests.post(OLLAMA_URL, json=payload)
+                farewell_msg = response.json().get("message", {}).get("content", "Thank you for chatting with me. Take care!")
+                print("\n" + "="*60)
+                print(f"💬 Agent: {farewell_msg}")
+                print("="*60 + "\n")
+            except Exception as e:
+                print("\n💬 Agent: Thank you so much for chatting with me today. Take care of yourself!")
+
+            # --- SAVE THE SUMMARY TO DISK ---
+            if final_summary:
+                filename = f"final_summary_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(filename, 'w') as f:
+                    json.dump({"semantic_summary": final_summary}, f, indent=4)
+                print(f"💾 Saved Final Semantic Summary to {filename}")
+                
+            break # Exit the while loop
         
         is_recording = True
         video_frames = []
