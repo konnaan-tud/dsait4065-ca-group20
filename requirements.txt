@@ -21,3 +21,9 @@ soundfile>=0.12.1
 deepface
 tf-keras
 opencv-python
+
+# --- User  Interface ---
+streamlit
+
+# --- Memory Database ---
+chromadb

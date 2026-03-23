@@ -1,2 +1,9 @@
 .DS_Store
 .bin
+
+*.sqlite3
+*.bin
+/.venv/
+**/__pycache__/
+**/debug_frames/
+*.wav
