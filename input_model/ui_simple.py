@@ -1,0 +1,491 @@
+import os
+import sys
+import time
+import json
+import queue
+import signal
+import threading
+import subprocess
+from pathlib import Path
+from collections import deque
+
+import streamlit as st
+
+
+# ============================================================
+# CONFIG
+# ============================================================
+TARGET_SCRIPT = "master_fusion.py"   # <-- change if needed
+ROOT_DIR = Path(__file__).resolve().parent
+SCRIPT_PATH = ROOT_DIR / TARGET_SCRIPT
+MAX_LOG_LINES = 3000
+MAX_CHAT_MESSAGES = 200
+AUTO_REFRESH_SECONDS = 0.7
+
+
+# ============================================================
+# STREAMLIT SETUP
+# ============================================================
+st.set_page_config(
+    page_title="Conversation Agent",
+    page_icon="💬",
+    layout="centered",
+)
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+def init_state():
+    defaults = {
+        "process": None,
+        "reader_thread": None,
+        "stderr_thread": None,
+        "stdout_queue": queue.Queue(),
+        "stderr_queue": queue.Queue(),
+        "process_running": False,
+        "logs": deque(maxlen=MAX_LOG_LINES),
+        "chat_messages": [],
+        "current_turn_id": None,
+        "latest_status": "Ready",
+        "latest_transcription": None,
+        "latest_agent_reply": None,
+        "last_event_time": None,
+        "show_debug": False,
+        "interaction_state": "idle",  # idle|starting|awaiting_start|recording|processing|stopping
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+init_state()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+def log(line: str, source: str = "stdout"):
+    if line is None:
+        return
+    line = line.rstrip("\n")
+    if not line:
+        return
+    prefix = "[stderr] " if source == "stderr" else ""
+    st.session_state.logs.append(prefix + line)
+
+
+def reader(pipe, out_queue):
+    try:
+        for line in iter(pipe.readline, ""):
+            out_queue.put(line)
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+
+def safe_json_loads(raw: str):
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def clear_queue(q: queue.Queue):
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            break
+
+
+def add_chat_message(role: str, text: str, turn_id=None):
+    if not text:
+        return
+
+    # avoid duplicate consecutive messages from reruns
+    if st.session_state.chat_messages:
+        last = st.session_state.chat_messages[-1]
+        if last.get("role") == role and last.get("text") == text and last.get("turn_id") == turn_id:
+            return
+
+    st.session_state.chat_messages.append(
+        {
+            "role": role,
+            "text": text,
+            "turn_id": turn_id,
+        }
+    )
+    if len(st.session_state.chat_messages) > MAX_CHAT_MESSAGES:
+        st.session_state.chat_messages = st.session_state.chat_messages[-MAX_CHAT_MESSAGES:]
+
+
+def handle_event(event: dict):
+    etype = event.get("type")
+    st.session_state.last_event_time = time.time()
+
+    if etype == "turn_start":
+        st.session_state.current_turn_id = event.get("turn_id")
+        st.session_state.latest_status = "Ready to start speaking"
+        st.session_state.interaction_state = "awaiting_start"
+
+    elif etype == "transcription":
+        text = event.get("text")
+        st.session_state.latest_transcription = text
+        st.session_state.latest_status = "Generating response"
+        st.session_state.interaction_state = "processing"
+        add_chat_message("user", text, st.session_state.current_turn_id)
+
+    elif etype == "agent_reply":
+        text = event.get("text")
+        st.session_state.latest_agent_reply = text
+        st.session_state.latest_status = "Agent replied"
+        add_chat_message("assistant", text, st.session_state.current_turn_id)
+
+    elif etype == "latency":
+        st.session_state.latest_status = "Turn complete"
+
+    elif etype == "running_summary":
+        # keep hidden in participant mode, available in debug section only through logs
+        pass
+
+
+EVENT_PREFIX = "UI_EVENT::"
+
+
+def pump_queues():
+    changed = False
+
+    while True:
+        try:
+            raw = st.session_state.stdout_queue.get_nowait()
+        except queue.Empty:
+            break
+
+        if raw.startswith(EVENT_PREFIX):
+            payload = raw[len(EVENT_PREFIX):].strip()
+            event = safe_json_loads(payload)
+            if event is not None:
+                handle_event(event)
+                changed = True
+            else:
+                log(raw)
+                changed = True
+        else:
+            log(raw)
+            changed = True
+
+    while True:
+        try:
+            raw = st.session_state.stderr_queue.get_nowait()
+        except queue.Empty:
+            break
+        log(raw, "stderr")
+        changed = True
+
+    proc = st.session_state.process
+    if proc is not None and proc.poll() is not None and st.session_state.process_running:
+        st.session_state.process_running = False
+        st.session_state.interaction_state = "idle"
+        st.session_state.latest_status = f"Process exited ({proc.returncode})"
+        log(f"[system] Process exited with code {proc.returncode}")
+        changed = True
+
+    return changed
+
+
+def start_process():
+    if not SCRIPT_PATH.exists():
+        log(f"[system] Script not found: {SCRIPT_PATH}")
+        st.session_state.latest_status = "Script not found"
+        return
+
+    if st.session_state.process_running:
+        log("[system] Process is already running.")
+        return
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    process = subprocess.Popen(
+        [sys.executable, str(SCRIPT_PATH)],
+        cwd=str(ROOT_DIR),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+        env=env,
+    )
+
+    st.session_state.process = process
+    st.session_state.process_running = True
+    st.session_state.latest_status = "Starting agent"
+    st.session_state.interaction_state = "starting"
+
+    st.session_state.reader_thread = threading.Thread(
+        target=reader,
+        args=(process.stdout, st.session_state.stdout_queue),
+        daemon=True,
+    )
+    st.session_state.stderr_thread = threading.Thread(
+        target=reader,
+        args=(process.stderr, st.session_state.stderr_queue),
+        daemon=True,
+    )
+    st.session_state.reader_thread.start()
+    st.session_state.stderr_thread.start()
+
+    log(f"[system] Started process: {SCRIPT_PATH.name}")
+
+
+def stop_process():
+    proc = st.session_state.process
+    if proc is None or not st.session_state.process_running:
+        log("[system] No running process to stop.")
+        return
+
+    try:
+        if os.name == "nt":
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGTERM)
+        st.session_state.latest_status = "Stopping agent"
+        st.session_state.interaction_state = "stopping"
+        log("[system] Sent terminate signal.")
+    except Exception as exc:
+        log(f"[system] Failed to stop process cleanly: {exc}")
+
+
+def send_stdin(text: str):
+    proc = st.session_state.process
+    if proc is None or not st.session_state.process_running:
+        log("[system] Cannot send input because the process is not running.")
+        return
+
+    try:
+        proc.stdin.write(text)
+        proc.stdin.flush()
+    except Exception as exc:
+        log(f"[system] Failed to send stdin: {exc}")
+
+
+def start_speaking():
+    st.session_state.latest_status = "Listening"
+    st.session_state.interaction_state = "recording"
+    send_stdin("\n")
+
+
+def stop_speaking():
+    st.session_state.latest_status = "Processing"
+    st.session_state.interaction_state = "processing"
+    send_stdin("\n")
+
+
+def quit_gracefully():
+    st.session_state.latest_status = "Quitting"
+    st.session_state.interaction_state = "stopping"
+    send_stdin("q\n")
+
+
+def reset_chat():
+    prev_status = st.session_state.latest_status
+    prev_interaction = st.session_state.interaction_state
+    st.session_state.chat_messages = []
+    st.session_state.latest_transcription = None
+    st.session_state.latest_agent_reply = None
+    st.session_state.current_turn_id = None
+    clear_queue(st.session_state.stdout_queue)
+    clear_queue(st.session_state.stderr_queue)
+    if st.session_state.process_running:
+        st.session_state.latest_status = prev_status
+        st.session_state.interaction_state = prev_interaction
+    else:
+        st.session_state.latest_status = "Ready"
+        st.session_state.interaction_state = "idle"
+
+
+def is_waiting_for_agent_reply() -> bool:
+    turn_id = st.session_state.current_turn_id
+    if turn_id is None:
+        return False
+
+    has_user = any(
+        m.get("role") == "user" and m.get("turn_id") == turn_id
+        for m in st.session_state.chat_messages
+    )
+    has_assistant = any(
+        m.get("role") == "assistant" and m.get("turn_id") == turn_id
+        for m in st.session_state.chat_messages
+    )
+
+    return (
+        st.session_state.process_running
+        and st.session_state.interaction_state == "processing"
+        and has_user
+        and not has_assistant
+    )
+
+
+# ============================================================
+# STYLING
+# ============================================================
+st.markdown(
+    """
+    <style>
+        .study-shell {
+            max-width: 760px;
+            margin: 0 auto;
+            padding-top: 0.5rem;
+        }
+        .study-title {
+            text-align: center;
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+        .study-subtitle {
+            text-align: center;
+            color: #6b7280;
+            margin-bottom: 1rem;
+        }
+        .status-pill {
+            display: inline-block;
+            padding: 0.35rem 0.7rem;
+            border-radius: 999px;
+            background: #f3f4f6;
+            border: 1px solid #e5e7eb;
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+            color: black;
+        }
+        .control-hint {
+            text-align: center;
+            color: #6b7280;
+            font-size: 0.95rem;
+            margin-top: 0.5rem;
+        }
+        .typing {
+            display: inline-flex;
+            gap: 0.3rem;
+            align-items: center;
+            min-height: 1.4rem;
+        }
+        .typing span {
+            width: 0.45rem;
+            height: 0.45rem;
+            background: #9ca3af;
+            border-radius: 50%;
+            animation: blink 1s infinite ease-in-out;
+        }
+        .typing span:nth-child(2) {
+            animation-delay: 0.15s;
+        }
+        .typing span:nth-child(3) {
+            animation-delay: 0.3s;
+        }
+        @keyframes blink {
+            0%, 80%, 100% { transform: scale(0.7); opacity: 0.45; }
+            40% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# MAIN APP
+# ============================================================
+pump_queues()
+ui_action_taken = False
+
+st.markdown('<div class="study-shell">', unsafe_allow_html=True)
+st.markdown('<div class="study-title">Conversation Agent</div>', unsafe_allow_html=True)
+st.markdown('<div class="study-subtitle">Speak naturally and continue the conversation using the buttons below.</div>', unsafe_allow_html=True)
+
+status_text = st.session_state.latest_status
+st.markdown(f'<div style="text-align:center;"><span class="status-pill">Status: {status_text}</span></div>', unsafe_allow_html=True)
+
+# Chat history window
+chat_box = st.container(height=460, border=True)
+with chat_box:
+    if st.session_state.chat_messages:
+        for message in st.session_state.chat_messages:
+            avatar = "🧑" if message["role"] == "user" else "🤖"
+            with st.chat_message(message["role"], avatar=avatar):
+                st.write(message["text"])
+
+        if is_waiting_for_agent_reply():
+            with st.chat_message("assistant", avatar="🤖"):
+                st.markdown(
+                    '<div class="typing"><span></span><span></span><span></span></div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        with st.chat_message("assistant", avatar="🤖"):
+            st.write("Hello — press **Start speaking** when you are ready.")
+
+st.write("")
+
+# Main controls for participant-facing UI
+col1, col2 = st.columns(2, gap="medium")
+with col1:
+    can_start = st.session_state.process_running and st.session_state.interaction_state == "awaiting_start"
+    if st.button(
+        "Start speaking",
+        width="stretch",
+        disabled=not can_start,
+        type="primary",
+    ):
+        ui_action_taken = True
+        start_speaking()
+
+with col2:
+    can_stop = st.session_state.process_running and st.session_state.interaction_state == "recording"
+    if st.button(
+        "Stop speaking",
+        width="stretch",
+        disabled=not can_stop,
+    ):
+        ui_action_taken = True
+        stop_speaking()
+
+st.markdown('<div class="control-hint">Press start, speak, then press stop when you are done.</div>', unsafe_allow_html=True)
+
+st.write("")
+
+# Secondary controls hidden away from the main interaction flow
+with st.expander("Session controls", expanded=False):
+    a, b, c = st.columns(3, gap="small")
+    with a:
+        if st.button("Launch agent", width="stretch"):
+            ui_action_taken = True
+            start_process()
+    with b:
+        if st.button("Quit gracefully", width="stretch", disabled=not st.session_state.process_running):
+            ui_action_taken = True
+            quit_gracefully()
+    with c:
+        if st.button("Stop process", width="stretch", disabled=not st.session_state.process_running):
+            ui_action_taken = True
+            stop_process()
+
+    d, e = st.columns(2, gap="small")
+    with d:
+        if st.button("Reset chat view", width="stretch"):
+            ui_action_taken = True
+            reset_chat()
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ============================================================
+# AUTO REFRESH
+# ============================================================
+if st.session_state.process_running:
+    time.sleep(AUTO_REFRESH_SECONDS)
+    st.rerun()

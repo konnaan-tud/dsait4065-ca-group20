@@ -43,6 +43,11 @@ narrative_summary = ""
 summary_lock = threading.Lock()
 turns_for_summary = [] # Buffer to hold the recent turns before summarizing
 
+# Helper function to print events Streamlit can lister for
+def ui_event(event_type, **payload):
+    event = {"type": event_type, **payload}
+    print("UI_EVENT::" + json.dumps(event), flush=True)
+
 # Maps modalities apparently not all modalities have the same name for emotions
 def normalize_emotion(label):
     mapping = {
@@ -159,6 +164,7 @@ def update_running_summary(recent_turns, current_summary):
         time_summary = time.time() - t0_summary
         
         new_summary = response.json().get("message", {}).get("content", "").strip()
+        ui_event("running_summary", text=new_summary)
         if new_summary:
             with summary_lock:
                 narrative_summary = new_summary
@@ -373,11 +379,14 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("SYSTEM READY. Awaiting your turn.")
     print("="*60 + "\n")
+    ui_event("turn_start", turn_id=turn_counter)
     
     while True:
 
+        
         print("\n" + "-"*60)
         user_cmd = input(f"TURN {turn_counter} | Press [ENTER] to start speaking (or type 'q' to quit): ")
+        ui_event("turn_start", turn_id=turn_counter)
         
        # --- SESSION SAVE ON QUIT ---
         if user_cmd.strip().lower() == 'q':
@@ -422,6 +431,7 @@ if __name__ == "__main__":
         # 1. TEXT TRANSLATION (Whisper)
         t0 = time.time()
         transcription = stt_pipeline(AUDIO_FILE)["text"].strip()
+        ui_event("transcription", text=transcription)
         time_whisper = time.time() - t0
         
         if not transcription:
@@ -493,6 +503,10 @@ if __name__ == "__main__":
         text_confident, text_top, text_score, text_diff = is_confident(text_emotions_norm)
         # Keep only Top 3 for the LLM prompt and printing
         top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
+        ui_event(
+            "text_top3",
+            items=[{"label": label, "score": float(score)} for label, score in top_3_text]
+        )
         time_roberta = time.time() - t0
     
         # 3. PROSODIC EMOTION (Audeering)
@@ -506,6 +520,10 @@ if __name__ == "__main__":
 
         # Penalize neutral for prosody
         ekman_probs_norm = penalize_neutral(ekman_probs_norm, penalty=0.6) # keeps 60% of the original distribution
+        ui_event(
+            "audio_probs",
+            items={k: float(v) for k, v in ekman_probs_norm.items()}
+        )
 
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
         time_audeering = time.time() - t0
@@ -513,6 +531,11 @@ if __name__ == "__main__":
         # 4. FACIAL EMOTION (DeepFace)
         t0 = time.time()
         top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff = process_video_frames(video_frames, cap)
+        ui_event(
+            "video_probs",
+            items={k: float(v) for k, v in avg_emotions_norm.items()} if valid_frames > 0 else {},
+            valid_frames=int(valid_frames)
+        )
         time_deepface = time.time() - t0
 
         # Define which modalities will be considered in the final output.
@@ -540,6 +563,30 @@ if __name__ == "__main__":
                 "confidence": face_score
             }
         
+        ui_event(
+            "confidence",
+            items={
+                "text": {
+                    "confident": bool(text_confident),
+                    "diff": float(text_diff),
+                    "top": text_top,
+                    "score": float(text_score),
+                },
+                "audio": {
+                    "confident": bool(audio_confident),
+                    "diff": float(audio_diff),
+                    "top": audio_top,
+                    "score": float(audio_score),
+                },
+                "face": {
+                    "confident": bool(face_confident),
+                    "diff": float(face_diff),
+                    "top": top_face_emo,
+                    "score": float(face_score) if valid_frames > 0 else 0.0,
+                },
+            }
+        )
+
         # Remove outliers
         modalities = prune_low_confidence_modalities(modalities)
 
@@ -591,6 +638,18 @@ if __name__ == "__main__":
 
             emotion_profile_text = "\n".join(emotion_profile)
 
+        ui_event(
+            "decision",
+            decision=decision,
+            modalities={
+                name: {
+                    "top": m["top"],
+                    "confidence": float(m["confidence"]),
+                }
+                for name, m in modalities.items()
+            }
+        )
+
         # --- 5. EPISODIC MEMORY (CHROMA DB) ---
         t0 = time.time()
         try:
@@ -602,6 +661,7 @@ if __name__ == "__main__":
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
         agent_reply = generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top, final_emotion, chat_history, decision, emotion_profile_text)
+        ui_event("agent_reply", text=agent_reply)
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
@@ -648,7 +708,18 @@ if __name__ == "__main__":
         total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
-        
+        ui_event(
+            "latency",
+            items={
+                "whisper": float(time_whisper),
+                "text_emotion": float(time_roberta),
+                "audio_emotion": float(time_audeering),
+                "video_emotion": float(time_deepface),
+                "memory_fetch": float(time_db),
+                "llm": float(time_llm),
+                "total": float(total_time),
+            }
+        )
         turn_counter += 1
 
     cap.release()
