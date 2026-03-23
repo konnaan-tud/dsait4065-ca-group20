@@ -76,36 +76,12 @@ def penalize_neutral(emotions, penalty=0.5):
 
     return adjusted
 
-# extract user emotion
-def extract_explicit_emotion(text):
-    text = text.lower()
-
-    emotion_keywords = {
-        "anger": ["angry", "mad", "annoyed", "frustrated"],
-        "disgust": ["disgusted", "gross", "ew", "nasty"],
-        "fear": ["scared", "afraid", "anxious", "nervous"],
-        "joy": ["happy", "good", "great", "excited", "glad"],
-        "sadness": ["sad", "down", "depressed", "unhappy"],
-        "surprise": ["surprised", "shocked", "wow", "unexpected"],
-        "neutral": ["okay", "fine", "alright", "normal"]
-    }
-
-    for emotion, keywords in emotion_keywords.items():
-        if any(word in text for word in keywords):
-            return emotion
-
-    return None
 
 def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     results = text_emotion_pipeline(user_reply)[0]
     predicted = max(results, key=lambda x: x["score"])
     
-    explicit = extract_explicit_emotion(user_reply)
-
-    if explicit:
-        return explicit, 1.0
-    else:
-        return predicted["label"], max(predicted["score"], 0.85) # give a higher prediction to the output of the text to emotion model
+    return predicted["label"], results # give a higher prediction to the output of the text to emotion model
 
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
@@ -123,10 +99,9 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
             print(f"   {emo}: {score:.2f}")
 
         print("\n🎵 AUDIO MODALITY:")
-        print(f"   Arousal: {arousal:.2f}")
-        print(f"   Valence: {valence:.2f}")
-        print(f"   Dominance: {dominance:.2f}")
-        print(f"   Ekman: {ekman_probs_norm}")
+        print("   Ekman probabilities:")
+        for emo, score in ekman_probs_norm.items():
+            print(f"   {emo}: {score:.2f}")
 
         print("\n🎭 VIDEO MODALITY:")
         if valid_frames>0:
@@ -258,7 +233,7 @@ def process_video_frames(video_frames, cap):
         avg_emotions_norm = {normalize_emotion(k): v for k, v in avg_emotions.items()}
 
         # Penalize neutral for facial emotion
-        avg_emotions_norm = penalize_neutral(avg_emotions_norm, penalty=0.5)
+        avg_emotions_norm = penalize_neutral(avg_emotions_norm, penalty=0.3) # keeps only 30% of the original distribution
 
         face_confident, top_face_emo, face_score, face_diff = is_confident(avg_emotions_norm)
     else:
@@ -456,22 +431,21 @@ if __name__ == "__main__":
         if pending_conflict_resolution:
             print("🧠 Resolving previous emotional conflict from user reply...")
 
-            final_emotion, final_score = resolve_conflict_with_user(
+            final_emotion, final_distribution = resolve_conflict_with_user(
                 transcription,
                 text_emotion_pipeline
             )
 
             emotions_record = {
                 "final_emotion": final_emotion,
-                "final_score": float(final_score),
-                "decision": "user_resolved"
+                "emotion_distribution": final_distribution,
             }
 
             db.add(transcription, emotions_record)
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
-            print(f"💾 Stored resolved emotion → {final_emotion} ({final_score:.2f})")
+            print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
             
             # fetch similar past events from db (once refactored call the function here)
             try:
@@ -530,7 +504,7 @@ if __name__ == "__main__":
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
         # Penalize neutral for prosody
-        ekman_probs_norm = penalize_neutral(ekman_probs_norm, penalty=0.5)
+        ekman_probs_norm = penalize_neutral(ekman_probs_norm, penalty=0.6) # keeps 60% of the original distribution
 
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
         time_audeering = time.time() - t0
@@ -569,10 +543,11 @@ if __name__ == "__main__":
         modalities = prune_low_confidence_modalities(modalities)
 
         # Define prompts for each case
-        decision, agreed_emotion = analyze_agreement(modalities)
+        decision, agreed_emotion, agreeing_modalities = analyze_agreement(modalities)
 
         final_emotion = None
         final_score = None
+        fused_dist = {}
 
         # CASE 0: No confident modality
         if decision == "no_data":
@@ -580,9 +555,10 @@ if __name__ == "__main__":
 
 
         # CASE 1: ONLY ONE CONFIDENT MODALITY  🔥 (NEW RULE)
-        elif len(modalities) == 1:
-            m_name = list(modalities.keys())[0]
-            m = modalities[m_name]
+        elif len(agreeing_modalities) == 1:
+            m_name = list(agreeing_modalities.keys())[0]
+            m = agreeing_modalities[m_name]
+            fused_dist = m["probs"]
 
             final_emotion = m["top"]
             final_score = m["confidence"]
@@ -600,13 +576,13 @@ if __name__ == "__main__":
 
         # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
         else:
-            final_emotion, fused_dist, weights = fuse_modalities(modalities)
+            final_emotion, fused_dist, weights = fuse_modalities(agreeing_modalities)
 
             final_score = fused_dist.get(final_emotion, 0.0)
 
             emotion_profile = [f"- Final emotion (fused): {final_emotion}"]
 
-            for m in modalities:
+            for m in agreeing_modalities:
                 emotion_profile.append(
                     f"- {m.capitalize()} supports: {modalities[m]['top']} "
                     f"(weight={weights[m]:.2f})"
@@ -649,12 +625,11 @@ if __name__ == "__main__":
         if final_emotion is not None and not pending_conflict_resolution:
             emotions_record = {
                 "final_emotion": final_emotion,
-                "final_score": float(final_score) if final_score else 1.0,
-                "decision": decision,
+                "emotion_distribution":  fused_dist
             }
             db.add(transcription, emotions_record)
             print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
-            print(f"Stored FINAL emotion in Chroma → {final_emotion} ({final_score:.2f})")
+            print(f"Stored FINAL emotion in Chroma → {final_emotion} ({fused_dist})")
         else:
             print("Skipping DB storage (no resolved emotion)")
 
