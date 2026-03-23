@@ -292,16 +292,15 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
 
         These signals do not agree.
         
-         Instructions:
-        - You are an empathetic agent who is confused by the user's mixed signals.
-        - If you noticed a contrast between the intense words they are using and their calm physical delivery. DO NOT say you are "confused". Instead, show deep empathy for this contrast (e.g., "You are using really intense words, but your voice sounds almost exhausted or numb...").
-        - Point out the contrast briefly and offer them a choice to clarify.
-        - Point this out VERY gently and non-judgmentally, like a caring friend checking in. DO NOT say things like "your face doesn't show emotion" or "your tone is neutral" (that sounds judgmental and creepy).
-        - Ask the user how they are actually feeling.
-        - Do NOT use robotic words like "modalities", "algorithms", or "text analysis".
-        - Use this style: "You're talking about something really [text_top], but you seem completely [voice_or_face_emo]. Are you actually feeling [text_top], or are you just used to this by now?"
-        - For example: "You are describing something really frustrating, but your voice sounds surprisingly calm. Are you feeling more angry, or just neutral?"
-        - Keep the response under 3 sentences. 
+        Instructions:
+        - You noticed this emotional mismatch. 
+        - Gently and naturally point out the contrast to the user. 
+        - NEVER use robotic system words like "modality", "confident", "fused", "text", or "audio".
+        - YOU MUST USE THE EXACT EMOTION WORDS provided above ({text_top}, {audio_top}, {top_face_emo}) in your response. Do not invent synonyms.
+        - Frame the exact words conversationally and empathetically, not judgmentally.
+        - End by warmly asking them to clarify how they are truly feeling underneath. We want them to answer clearly.
+        - Maximum 3 sentences.
+
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
