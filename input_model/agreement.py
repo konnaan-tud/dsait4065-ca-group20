@@ -23,4 +23,4 @@ def analyze_agreement(modalities):
         return "partial_agreement", dominant, agreeing
 
     else:
-        return "conflict", None, {}
+        return "conflict", None, modalities

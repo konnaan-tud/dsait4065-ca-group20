@@ -226,7 +226,7 @@ def process_video_frames(video_frames, cap):
 
     return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
-def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top,
+def generate_agent_reply(transcription, helper_events, modalities,
                          final_emotion, chat_history, decision, emotion_profile_text):
     print("\n🧠 Sending profile to LLM...")
 
@@ -261,6 +261,8 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
 
     # CONFLICT
     if decision == "conflict":
+        emotions = [f"{name} → {m['top']} ({m['confidence']:.2f})" for name, m in modalities.items()]
+
         contextual_user_message = f"""
         [Hidden Context for Agent]
 
@@ -269,9 +271,7 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
 
         Emotion signals detected by the system:
 
-        - Text analysis suggests: {text_top}
-        - Voice tone suggests: {audio_top}
-        - Facial expression suggests: {top_face_emo}
+        {emotions}
 
         These signals do not agree.
         
@@ -279,12 +279,13 @@ def generate_agent_reply(transcription, helper_events, top_face_emo, text_top, a
         - You noticed this emotional mismatch. 
         - Gently and naturally point out the contrast to the user. 
         - NEVER use robotic system words like "modality", "confident", "fused", "text", or "audio".
-        - YOU MUST USE THE EXACT EMOTION WORDS provided above ({text_top}, {audio_top}, {top_face_emo}) in your response. Do not invent synonyms.
+        - YOU MUST USE THE EXACT EMOTION WORDS provided above ({emotions}) in your response. Do not invent synonyms.
         - Frame the exact words conversationally and empathetically, not judgmentally.
         - End by warmly asking them to clarify how they are truly feeling underneath. We want them to answer clearly.
         - Maximum 3 sentences.
 
         """
+        print(contextual_user_message)
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
         contextual_user_message = f"""
@@ -439,10 +440,8 @@ if __name__ == "__main__":
             agent_reply = generate_agent_reply(
                 transcription,
                 helper_events=helper_events,
-                top_face_emo=None,
-                text_top=final_emotion,
-                audio_top=None,
                 final_emotion=final_emotion,
+                modalities=modalities,
                 chat_history=chat_history,
                 decision="resolved",
                 emotion_profile_text=emotion_profile_text
@@ -579,7 +578,7 @@ if __name__ == "__main__":
 
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
-        agent_reply = generate_agent_reply(transcription, helper_events, top_face_emo, text_top, audio_top, final_emotion, chat_history, decision, emotion_profile_text)
+        agent_reply = generate_agent_reply(transcription, helper_events, modalities, final_emotion, chat_history, decision, emotion_profile_text)
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
