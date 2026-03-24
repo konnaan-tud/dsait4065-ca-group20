@@ -442,21 +442,24 @@ if __name__ == "__main__":
                 text_emotion_pipeline
             )
 
+            # 💡 FIX 1: Combine the two utterances into one "Document"
+            # This ensures both the trigger and the explanation are searchable.
+            full_narrative = f"Initial Event: {pending_event['initial_text']} | Clarification: {transcription}"
+
             final_distribution_dict = {
                 normalize_emotion(x["label"]): x["score"]
                 for x in final_distribution
             }
 
             emotions_record = {
-                "initial_text": pending_event["initial_text"],
-                "initial_state": pending_event["initial_state"],
                 "final_emotion": final_emotion,
-                "emotion_distribution": final_distribution_dict,
+                "emotion_distribution": final_distribution_dict
             }
 
             print(emotions_record)
 
-            db.add(transcription, emotions_record)
+            # 💡 FIX 2: Use the combined narrative as the primary Document
+            db.add(full_narrative, emotions_record)
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
