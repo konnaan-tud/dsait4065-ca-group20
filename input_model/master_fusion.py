@@ -5,6 +5,7 @@ transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
 transformers.modeling_utils.check_torch_load_is_safe = lambda: None
 
 import cv2
+import json
 import os
 import json
 import sounddevice as sd
@@ -35,7 +36,12 @@ SAMPLE_RATE = 16000
 OLLAMA_URL = "http://localhost:11434/api/chat"
 CONFIDENCE_THRESHOLD = 0.15 # to test
 
+# 💡 NEW: Memory Contradiction Settings
+SEMANTIC_DISTANCE_THRESHOLD = 1.1 # Semantic match threshold 
+MEMORY_CONTRADICTION_THRESHOLD = 0.20 # MAE threshold for triggering the Curiosity Prompt
+
 is_recording = False
+last_valid_agent_utterance = ""  # 💡 Added this variable to track the conversation!
 
 # --- HYBRID MEMORY STATE VARIABLES ---
 narrative_summary = ""
@@ -67,12 +73,47 @@ def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     results = text_emotion_pipeline(user_reply)[0]
     predicted = max(results, key=lambda x: x["score"])
     
-    return predicted["label"], results # give a higher prediction to the output of the text to emotion model
+    # 💡 FIX: Flatten the list into a dictionary so MAE math works
+    flat_distribution = {normalize_emotion(res["label"]): res["score"] for res in results}
+    return predicted["label"], flat_distribution
 
+def fetch_temporal_memory(db, current_text, current_emotion_dist):
+    """Fetches past events and calculates the MAE emotional contradiction."""
+    memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
+    
+    try:
+        results = db.query(current_text, n_results=1)
+        
+        if results:
+            dist = results[0].get("distance", 999.0)
+            
+            if dist < SEMANTIC_DISTANCE_THRESHOLD:
+                past_event = results[0]
+                p_text = past_event.get("text", "")
+                
+                # Safely unpack the nested dictionary
+                p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
+                p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
+                
+                if p_dist:
+                    emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
+                    # Calculate Mean Absolute Error
+                    mae = sum(abs(current_emotion_dist.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
+                    
+                    memory_data = {
+                        "past_text": p_text,
+                        "mae": mae,
+                        "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
+                        "past_top": p_top
+                    }
+    except Exception as e:
+        pass
+
+    return memory_data
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
                        ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
-                       text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff):
+                       text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
         print("🤖 AGENT RESPONSE")
         print("="*60)
@@ -106,6 +147,17 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
 
         for name, m in modalities.items():
             print(f" - {name}: {m['top']} (confidence={m['confidence']:.2f})")
+        
+        # 💡 NEW: Cleanly print the Memory Match right here in the final output!
+        if memory_data and memory_data.get("past_text"):
+            print("\n🕰️ TEMPORAL MEMORY CHECK")
+            print(f"Past Event Matched: '{memory_data['past_text']}'")
+            print(f"Past Dominant Emo : {memory_data['past_top']}")
+            print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
+            if memory_data['is_contradiction']:
+                print(f"   ⚠️ Memory vs Present Events Contradiction Detected (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
+            else:
+                print(f"   ✅ Memory & Present Events Alignment Detected (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
 
 # --- HYBRID MEMORY: ASYNCHRONOUS RUNNING SUMMARY ---
 def update_running_summary(recent_turns, current_summary):
@@ -228,43 +280,16 @@ def process_video_frames(video_frames, cap):
 
     return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
-def generate_agent_reply(transcription, helper_events, modalities,
-                         final_emotion, chat_history, decision, emotion_profile_text):
+def generate_agent_reply(transcription, text_top, modalities,
+                         final_emotion, chat_history, decision, emotion_profile_text, memory_data=None):
+
+    global last_valid_agent_utterance
+
     print("\n🧠 Sending profile to LLM...")
 
     with summary_lock:
-        current_summary = narrative_summary        
+        current_summary = narrative_summary
 
-    past_context_lines = []           
-
-    for e in helper_events:
-        emotions = e.get("emotions") or {}
-
-        # --- FIXED EMOTION FORMATTING ---
-        if "final_emotion" in emotions:
-            emo = emotions.get("final_emotion", "unknown")
-
-            dist = emotions.get("emotion_distribution", {})
-            if isinstance(dist, dict) and len(dist) > 0:
-                top = max(dist, key=dist.get)
-                score = dist.get(top, 0.0)
-                emotions_str = f"{emo} ({score:.2f})"
-            else:
-                emotions_str = f"{emo}"
-
-        elif "final_score" in emotions:
-            emotions_str = f"score: {emotions['final_score']:.2f}"
-
-        else:
-            emotions_str = "(no emotion data)"
-
-        past_context_lines.append(
-            f'  - "{e["text"]}" (emotions: {emotions_str})'
-        )
-
-    past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
-
-    print('\n📚 Past similar prompts with emotional context:\n' + past_context)
     if current_summary:
         print(f'\n🧠 Current Semantic Summary:\n  {current_summary}')
 
@@ -308,6 +333,22 @@ def generate_agent_reply(transcription, helper_events, modalities,
         """
         print(contextual_user_message)
         chat_history.append({"role": "user", "content": contextual_user_message})
+    # RESOLVED
+    elif decision == "resolved":
+        contextual_user_message = f"""
+        [Hidden Context for Agent]
+        The user just clarified an emotional contradiction from the previous turn.
+        User's clarification: "{transcription}"
+        User's true emotion: {text_top}
+
+        Instructions:
+        - Briefly validate their true feeling (e.g., "Thank you for clarifying...").
+        - IMPORTANT: We just took a brief detour. You need to return to the conversation. 
+        - The last topic or question you were discussing before the detour was: "{last_valid_agent_utterance}"
+        - Naturally transition BACK to that topic or continue the thought. 
+        - Keep it seamless and conversational, strictly under 3 sentences.
+        """
+        chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
         contextual_user_message = f"""
             [Hidden Context for Agent]
@@ -325,13 +366,37 @@ def generate_agent_reply(transcription, helper_events, modalities,
         print(contextual_user_message)
         chat_history.append({"role": "user", "content": contextual_user_message})
 
+    # NORMAL FUSION (WITH MEMORY CHECK)
     else:
+        memory_injection = ""
+        if memory_data and memory_data.get("past_text"):
+            past_text = memory_data["past_text"]
+            past_emo = memory_data["past_top"]
+            current_emo = final_emotion
+            
+            if memory_data.get("is_contradiction"):
+                memory_injection = f"""
+                [Hidden Memory Context]
+                The user is talking about: "{transcription}" and currently feeling {current_emo}. 
+                However, in the past, when they experienced a very similar event ("{past_text}"), they appeared to feel ({past_emo}). 
+                Strategy: Gently note that they are reacting differently this time compared to the past, and ask a curious clarification question to explore why this time feels different to them.
+                CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Describe the shift using natural, empathetic human language.
+                """
+            else:
+                memory_injection = f"""
+                [Hidden Memory Context]
+                The user is talking about: "{transcription}". 
+                In the past, when they experienced a very similar event ("{past_text}"), they felt {past_emo}. 
+                Today, they are feeling the exact same way ({current_emo}). 
+                Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
+                CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Paraphrase their emotional state using natural human language.
+                """
 
         contextual_user_message = f"""
         [Hidden Context for Agent]
         User emotional profile: "{emotion_profile_text}"
         Detected emotional state: {final_emotion if final_emotion else "uncertain"}
-        Past Similar Events: {past_context}
+        {memory_injection}
 
         User message: "{transcription}"
         """
@@ -358,6 +423,9 @@ def generate_agent_reply(transcription, helper_events, modalities,
     if agent_reply != "Error generating response." and agent_reply != "Could not connect to local Ollama LLM.":
         chat_history.append({"role": "assistant", "content": agent_reply})
         
+    # Save this reply as the "last valid reply" if it's not a conflict detour
+    if decision != "conflict":
+        last_valid_agent_utterance = agent_reply
     return agent_reply
 
 
@@ -386,14 +454,48 @@ if __name__ == "__main__":
         
        # --- SESSION SAVE ON QUIT ---
         if user_cmd.strip().lower() == 'q':
-            print("\n👋 Ending conversation. Goodbye!")
+            print("\n👋 Wrapping up the conversation... Please wait a moment.")
+            
             with summary_lock:
-                if narrative_summary:
-                    filename = f"final_summary_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                    with open(filename, 'w') as f:
-                        json.dump({"semantic_summary": narrative_summary}, f, indent=4)
-                    print(f"💾 Saved Final Semantic Summary to {filename}")
-            break
+                final_summary = narrative_summary
+                
+            # --- GENERATE THE FINAL GOODBYE MESSAGE ---
+            final_prompt = f"""
+            [Hidden Context for Agent]
+            The user has decided to end the conversation for today.
+            
+            Here is the running summary of their story and emotional journey today:
+            {final_summary if final_summary else "(No summary available, it was a very short chat)."}
+            
+            Instructions:
+            - Act as an empathetic therapist/friend saying goodbye.
+            - Start by saying something like "Thank you so much for sharing all of this with me today."
+            - Translate the summary above into a warm, natural narrative. You must explicitly mention the specific events they went through (the facts) and connect them to how they felt (the emotions).
+            - Validate this specific emotional journey and reassure them.
+            - End with a warm, encouraging sign-off.
+            - Keep it compassionate and natural. Maximum 5 to 6 sentences.
+            """
+            
+            chat_history.append({"role": "user", "content": final_prompt})
+            payload = {"model": "llama3", "messages": chat_history, "stream": False, "think": False}
+            
+            try:
+                response = requests.post(OLLAMA_URL, json=payload)
+                farewell_msg = response.json().get("message", {}).get("content", "Thank you for chatting with me. Take care!")
+                print("\n" + "="*60)
+                print(f"💬 Agent: {farewell_msg}")
+                print("="*60 + "\n")
+            except Exception as e:
+                print("\n💬 Agent: Thank you so much for chatting with me today. Take care of yourself!")
+
+            # --- SAVE THE SUMMARY TO DISK ---
+            if final_summary:
+                filename = f"final_summary_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(filename, 'w') as f:
+                    json.dump({"semantic_summary": final_summary}, f, indent=4)
+                print(f"💾 Saved Final Semantic Summary to {filename}")
+                
+            break # Exit the while loop
         
         is_recording = True
         video_frames = []
@@ -446,19 +548,15 @@ if __name__ == "__main__":
             # This ensures both the trigger and the explanation are searchable.
             full_narrative = f"Initial Event: {pending_event['initial_text']} | Clarification: {transcription}"
 
-            final_distribution_dict = {
-                normalize_emotion(x["label"]): x["score"]
-                for x in final_distribution
-            }
-
             emotions_record = {
                 "final_emotion": final_emotion,
-                "emotion_distribution": final_distribution_dict
+                "emotion_distribution": final_distribution
             }
 
             print(emotions_record)
 
             # 💡 FIX 2: Use the combined narrative as the primary Document
+            memory_data = fetch_temporal_memory(db, transcription, final_distribution)
             db.add(full_narrative, emotions_record)
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
@@ -466,26 +564,32 @@ if __name__ == "__main__":
             print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
 
             pending_clarification = None
-            
-            # fetch similar past events from db (once refactored call the function here)
-            try:
-                helper_events = db.query(transcription, n_results=3)
-            except Exception:
-                helper_events = []
 
             agent_reply = generate_agent_reply(
-                transcription,
-                helper_events=helper_events,
+                transcription=transcription,
+                text_top=final_emotion,
                 final_emotion=final_emotion,
                 modalities={"text": {
                     "top": final_emotion,
-                    "confidence": max([x["score"] for x in final_distribution])
+                    "confidence": max(final_distribution.values())
                 }},
                 chat_history=chat_history,
                 decision="resolved",
-                emotion_profile_text=emotion_profile_text
+                emotion_profile_text=emotion_profile_text,
+                memory_data=memory_data
             )
 
+            # 💡 Cleanly print the memory check for resolved turns
+            if memory_data and memory_data.get("past_text"):
+                print("\n🕰️ TEMPORAL MEMORY CHECK (Detour Resolved)")
+                print(f"Past Event Matched: '{memory_data['past_text']}'")
+                print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
+                if memory_data['is_contradiction']:
+                    print(f"Result            : ⚠️ CONTRADICTION (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
+                else:
+                    print(f"Result            : ✅ ALIGNMENT (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
+
+            print(f"🗣️ User Said: '{transcription}'")
             print(f"\n💬 Agent: {agent_reply}")
 
             # 💡 FIX: Add the resolution turn to the summary queue before continuing!
@@ -620,22 +724,33 @@ if __name__ == "__main__":
 
             emotion_profile_text = "\n".join(emotion_profile)
 
-        # --- 5. EPISODIC MEMORY (CHROMA DB) ---
+        # --- 5. EPISODIC MEMORY (CHROMA DB) WITH MAE MATH ---
         t0 = time.time()
-        try:
-            helper_events = db.query(transcription, n_results=3)
-        except Exception:
-            helper_events = [] # Failsafe if the database is empty on turn 1
+        memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
+        
+        # Only fetch memory if we actually have a confident present emotion!
+        if final_emotion is not None and fused_dist:
+            memory_data = fetch_temporal_memory(db, transcription, fused_dist)
+            
         time_db = time.time() - t0
 
         # --- 6. THE LLM DIALOG MANAGER ---
         t0 = time.time()
-        agent_reply = generate_agent_reply(transcription, helper_events, modalities, final_emotion, chat_history, decision, emotion_profile_text)
+        agent_reply = generate_agent_reply(
+            transcription=transcription, 
+            text_top=text_top, 
+            final_emotion=final_emotion, 
+            chat_history=chat_history, 
+            decision=decision,
+            modalities=modalities, 
+            emotion_profile_text=emotion_profile_text, 
+            memory_data=memory_data
+        )
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
-                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
+                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data)
         save_debug_frames(video_frames, turn_counter)
 
         # --- HYBRID MEMORY: QUEUE FOR SUMMARY ---
