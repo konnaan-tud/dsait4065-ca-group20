@@ -70,46 +70,13 @@ def normalize_emotion(label):
 
     return mapping.get(label.lower(), label.lower())
 
-def transform_go_emotions_into_ekman(model_output):
-    mapping = {
-    "anger": ["anger", "annoyance", "disapproval"],
-    "disgust": ["disgust"],
-    "fear": ["fear", "nervousness"],
-    "joy": ["joy", "amusement", "approval", "excitement", "gratitude",  "love", "optimism", "relief", "pride", "admiration", "desire", "caring"],
-    "sadness": ["sadness", "disappointment", "embarrassment", "grief",  "remorse"],
-    "surprise": ["surprise", "realization", "confusion", "curiosity"],
-    "neutral": ["neutral"]
-    }
-
-    ekman_scores = {key: 0.0 for key in mapping}
-    for item in model_output:
-        label, score = item["label"].lower(), item["score"]
-        for ekman_label, go_labels in mapping.items():
-            if label in go_labels:
-                ekman_scores[ekman_label] += score
-                break
-
-    total = sum(ekman_scores.values())
-    if total > 0:
-        ekman_scores = {k: v / total for k, v in ekman_scores.items()}
-    
-    ekman_scores_refined = sorted([{"label": k, "score": v} for k, v in ekman_scores.items()], key=lambda x: x["score"], reverse=True)
-
-    return ekman_scores_refined
-
 def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     results = text_emotion_pipeline(user_reply)[0]
-    # 1. Immediately map the 28 emotions to the 7 Ekman categories
-    ekman_refined = transform_go_emotions_into_ekman(results)
+    predicted = max(results, key=lambda x: x["score"])
     
-    # 2. Convert the list of dicts into a simple dictionary for the rest of the app
-    # This creates a dict like {'anger': 0.85, 'joy': 0.05, ...}
-    ekman_distribution = {normalize_emotion(res["label"]): res["score"] for res in ekman_refined}
-    
-    # 3. Find the top emotion from the mapped 7
-    predicted_label = max(ekman_distribution, key=ekman_distribution.get)
-    
-    return predicted_label, ekman_distribution
+    # 💡 FIX: Flatten the list into a dictionary so MAE math works
+    flat_distribution = {normalize_emotion(res["label"]): res["score"] for res in results}
+    return predicted["label"], flat_distribution
 
 def fetch_temporal_memory(db, current_text, current_emotion_dist):
     """Fetches past events and calculates the MAE emotional contradiction."""
@@ -256,7 +223,7 @@ def model_initialization():
     print("  -> Loading Whisper...")
     stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
     print("  -> Loading DistilRoBERTa Text Emotions (7 Ekman)...")
-    text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
+    text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
     print("  -> Loading Audeering Prosodic Emotions...")
     audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
     tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
@@ -649,8 +616,7 @@ if __name__ == "__main__":
         # 2. TEXT EMOTION (RoBERTa)
         t0 = time.time()
         # Keep ALL 7 results for the database
-        all_text_emotions_go = text_emotion_pipeline(transcription)[0]
-        all_text_emotions = transform_go_emotions_into_ekman(all_text_emotions_go)
+        all_text_emotions = text_emotion_pipeline(transcription)[0]
         text_emotions_norm = {normalize_emotion(res["label"]): res["score"] for res in all_text_emotions}
         text_confident, text_top, text_score, text_diff = is_confident(text_emotions_norm)
         # Keep only Top 3 for the LLM prompt and printing

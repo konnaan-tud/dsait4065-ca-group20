@@ -21,3 +21,6 @@ soundfile>=0.12.1
 deepface
 tf-keras
 opencv-python
+
+# --- TTS (Text-to-Speech) ---
+TTS==0.14.1
