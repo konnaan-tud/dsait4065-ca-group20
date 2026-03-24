@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import json
+import html
 import queue
 import signal
 import threading
@@ -462,6 +463,19 @@ st.markdown(
             0%, 80%, 100% { transform: scale(0.7); opacity: 0.45; }
             40% { transform: scale(1); opacity: 1; }
         }
+        .raw-console-scroll {
+            max-height: 300px;
+            overflow-y: auto;
+            overflow-x: auto;
+            background: #111827;
+            color: #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.82rem;
+            line-height: 1.35;
+            white-space: pre;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -641,7 +655,11 @@ if st.session_state.show_debug:
     st.markdown("### Raw console")
     with st.container(border=True):
         if st.session_state.logs:
-            st.code("\n".join(st.session_state.logs), language="text")
+            logs_text = html.escape("\n".join(st.session_state.logs))
+            st.markdown(
+                f'<div class="raw-console-scroll">{logs_text}</div>',
+                unsafe_allow_html=True,
+            )
         else:
             st.write("No logs yet.")
 
