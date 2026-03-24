@@ -438,6 +438,7 @@ if __name__ == "__main__":
             agent_reply = generate_agent_reply(
                 transcription,
                 helper_events=helper_events,
+                final_emotion=final_emotion,
                 modalities=modalities,
                 chat_history=chat_history,
                 decision="resolved",
@@ -521,6 +522,7 @@ if __name__ == "__main__":
         decision, agreed_emotion, agreeing_modalities = analyze_agreement(modalities)
 
         final_emotion = None
+        final_score = None
         fused_dist = {}
 
         # CASE 0: No confident modality
@@ -544,6 +546,7 @@ if __name__ == "__main__":
 
         # CASE 2: CONFLICT (ALL DIFFERENT)
         elif decision == "conflict":
+            final_emotion = None
             emotion_profile_text = "Conflicting emotional signals across modalities."
             pending_conflict_resolution = True
 
