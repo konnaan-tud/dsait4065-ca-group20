@@ -322,6 +322,7 @@ def generate_agent_reply(transcription, helper_events, modalities,
             - Do NOT guess or force an emotion.
             - Keep it natural and under 3 sentences.
             """
+        print(contextual_user_message)
         chat_history.append({"role": "user", "content": contextual_user_message})
 
     else:
@@ -372,6 +373,7 @@ if __name__ == "__main__":
     turn_counter = 1
 
     pending_clarification = None
+    pending_event = None
     
     print("\n" + "="*60)
     print("✅ SYSTEM READY. Awaiting your turn.")
@@ -446,9 +448,13 @@ if __name__ == "__main__":
             }
 
             emotions_record = {
+                "initial_text": pending_event["initial_text"],
+                "initial_state": pending_event["initial_state"],
                 "final_emotion": final_emotion,
                 "emotion_distribution": final_distribution_dict,
             }
+
+            print(emotions_record)
 
             db.add(transcription, emotions_record)
 
@@ -565,6 +571,11 @@ if __name__ == "__main__":
             final_emotion = None
             emotion_profile_text = "No confident emotional signal detected."
 
+            pending_event = {
+                "initial_text": transcription,
+                "initial_state": "no_data"
+            }
+
         # CASE 1: ONLY ONE CONFIDENT MODALITY  🔥 (NEW RULE)
         elif len(agreeing_modalities) == 1:
             m_name = list(agreeing_modalities.keys())[0]
@@ -584,6 +595,11 @@ if __name__ == "__main__":
             final_emotion = None
             emotion_profile_text = "Conflicting emotional signals across modalities."
             pending_clarification = "conflict"
+
+            pending_event = {
+                "initial_text": transcription,
+                "initial_state": "conflict"
+            }
 
         # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
         else:
