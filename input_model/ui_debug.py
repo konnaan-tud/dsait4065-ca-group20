@@ -188,18 +188,24 @@ def push_completed_turn_if_ready():
 
 def handle_event(event: dict):
     etype = event.get("type")
-    cur = st.session_state.current_turn
-
     st.session_state.events.append(event)
     if len(st.session_state.events) > 1000:
         st.session_state.events = st.session_state.events[-1000:]
+
+    if etype == "awaiting_start":
+        st.session_state.current_turn_id = event.get("turn_id")
+        st.session_state.latest_status = "Ready to start speaking"
+        st.session_state.interaction_state = "awaiting_start"
+        return
+
+    cur = st.session_state.current_turn
 
     if etype == "turn_start":
         if cur.get("transcription") or cur.get("agent_reply"):
             push_completed_turn_if_ready()
         st.session_state.current_turn_id = event.get("turn_id")
-        st.session_state.latest_status = "Ready to start speaking"
-        st.session_state.interaction_state = "awaiting_start"
+        st.session_state.latest_status = "Listening"
+        st.session_state.interaction_state = "recording"
         st.session_state.current_turn = {
             "turn_id": event.get("turn_id"),
             "transcription": None,

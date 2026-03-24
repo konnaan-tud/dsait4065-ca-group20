@@ -8,3 +8,6 @@
 **/debug_frames/
 *.wav
 *.json
+venv/
+.venv/
+test/

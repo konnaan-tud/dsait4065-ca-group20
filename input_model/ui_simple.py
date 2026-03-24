@@ -126,10 +126,15 @@ def handle_event(event: dict):
     etype = event.get("type")
     st.session_state.last_event_time = time.time()
 
-    if etype == "turn_start":
+    if etype == "awaiting_start":
         st.session_state.current_turn_id = event.get("turn_id")
         st.session_state.latest_status = "Ready to start speaking"
         st.session_state.interaction_state = "awaiting_start"
+
+    elif etype == "turn_start":
+        st.session_state.current_turn_id = event.get("turn_id")
+        st.session_state.latest_status = "Listening"
+        st.session_state.interaction_state = "recording"
 
     elif etype == "transcription":
         text = event.get("text")

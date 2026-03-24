@@ -27,3 +27,6 @@ streamlit
 
 # --- Memory Database ---
 chromadb
+
+# --- TTS (Text-to-Speech) ---
+TTS
