@@ -6,7 +6,7 @@ transformers.modeling_utils.check_torch_load_is_safe = lambda: None
 
 import cv2
 import os
-import sys
+import json
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -223,6 +223,8 @@ def process_video_frames(video_frames, cap):
         face_confident=False
         top_face_emo="No face detected"
         face_diff=0
+        face_score = 0.0
+        avg_emotions_norm = {}
 
     return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
@@ -232,13 +234,34 @@ def generate_agent_reply(transcription, helper_events, modalities,
 
     with summary_lock:
         current_summary = narrative_summary        
+
     past_context_lines = []           
+
     for e in helper_events:
         emotions = e.get("emotions") or {}
-        emotions_str = ", ".join(
-            f"{k}: {v:.2f}" for k, v in emotions.items() if isinstance(v, (int, float))
+
+        # --- FIXED EMOTION FORMATTING ---
+        if "final_emotion" in emotions:
+            emo = emotions.get("final_emotion", "unknown")
+
+            dist = emotions.get("emotion_distribution", {})
+            if isinstance(dist, dict) and len(dist) > 0:
+                top = max(dist, key=dist.get)
+                score = dist.get(top, 0.0)
+                emotions_str = f"{emo} ({score:.2f})"
+            else:
+                emotions_str = f"{emo}"
+
+        elif "final_score" in emotions:
+            emotions_str = f"score: {emotions['final_score']:.2f}"
+
+        else:
+            emotions_str = "(no emotion data)"
+
+        past_context_lines.append(
+            f'  - "{e["text"]}" (emotions: {emotions_str})'
         )
-        past_context_lines.append(f'  - "{e["text"]}" (emotions: {emotions_str})')    
+
     past_context = "\n".join(past_context_lines) if past_context_lines else "  (none)"
 
     print('\n📚 Past similar prompts with emotional context:\n' + past_context)
@@ -287,18 +310,18 @@ def generate_agent_reply(transcription, helper_events, modalities,
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
         contextual_user_message = f"""
-        [Hidden Context for Agent]
+            [Hidden Context for Agent]
 
-        User message: "{transcription}"
-        User emotional profile: "{emotion_profile_text}"
+            User message: "{transcription}"
 
-        No clear emotional signal was detected.
+            No clear emotional signal detected.
 
-        Instructions:
-        - Respond naturally.
-        - Ask a question that encourages the user to continue the story.
-        - Keep the response under 3 sentences.
-        """
+            Instructions:
+            - Be honest that you're not fully sure how they're feeling.
+            - Ask a gentle, open-ended clarification question.
+            - Do NOT guess or force an emotion.
+            - Keep it natural and under 3 sentences.
+            """
         chat_history.append({"role": "user", "content": contextual_user_message})
 
     else:
@@ -348,7 +371,7 @@ if __name__ == "__main__":
     
     turn_counter = 1
 
-    pending_conflict_resolution = False
+    pending_clarification = None
     
     print("\n" + "="*60)
     print("✅ SYSTEM READY. Awaiting your turn.")
@@ -409,17 +432,22 @@ if __name__ == "__main__":
             continue
 
         # Handle reply of user in case of conflict
-        if pending_conflict_resolution:
-            print("🧠 Resolving previous emotional conflict from user reply...")
+        if pending_clarification in ("conflict", "no_data"):
+            print("🧠 Resolving previous emotional conflict/no_data from user reply...")
 
             final_emotion, final_distribution = resolve_conflict_with_user(
                 transcription,
                 text_emotion_pipeline
             )
 
+            final_distribution_dict = {
+                normalize_emotion(x["label"]): x["score"]
+                for x in final_distribution
+            }
+
             emotions_record = {
                 "final_emotion": final_emotion,
-                "emotion_distribution": final_distribution,
+                "emotion_distribution": final_distribution_dict,
             }
 
             db.add(transcription, emotions_record)
@@ -427,6 +455,8 @@ if __name__ == "__main__":
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
             print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
+
+            pending_clarification = None
             
             # fetch similar past events from db (once refactored call the function here)
             try:
@@ -434,12 +464,14 @@ if __name__ == "__main__":
             except Exception:
                 helper_events = []
 
-            pending_conflict_resolution = False
             agent_reply = generate_agent_reply(
                 transcription,
                 helper_events=helper_events,
                 final_emotion=final_emotion,
-                modalities=modalities,
+                modalities={"text": {
+                    "top": final_emotion,
+                    "confidence": max([x["score"] for x in final_distribution])
+                }},
                 chat_history=chat_history,
                 decision="resolved",
                 emotion_profile_text=emotion_profile_text
@@ -525,10 +557,13 @@ if __name__ == "__main__":
         final_score = None
         fused_dist = {}
 
+
+
         # CASE 0: No confident modality
         if decision == "no_data":
+            pending_clarification = "no_data"
+            final_emotion = None
             emotion_profile_text = "No confident emotional signal detected."
-
 
         # CASE 1: ONLY ONE CONFIDENT MODALITY  🔥 (NEW RULE)
         elif len(agreeing_modalities) == 1:
@@ -548,7 +583,7 @@ if __name__ == "__main__":
         elif decision == "conflict":
             final_emotion = None
             emotion_profile_text = "Conflicting emotional signals across modalities."
-            pending_conflict_resolution = True
+            pending_clarification = "conflict"
 
         # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
         else:
@@ -598,7 +633,7 @@ if __name__ == "__main__":
             turns_for_summary.clear()
 
         # --- 7. STORE IN CHROMA ---
-        if final_emotion is not None and not pending_conflict_resolution:
+        if final_emotion is not None and pending_clarification is None:
             emotions_record = {
                 "final_emotion": final_emotion,
                 "emotion_distribution":  fused_dist
