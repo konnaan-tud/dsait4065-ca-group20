@@ -215,7 +215,7 @@ def model_initialization():
     text_emotion_pipeline = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", top_k=None)
     print("  -> Loading Audeering Prosodic Emotions...")
     audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
-    tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC", progress_bar=False)
+    tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
     return stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
