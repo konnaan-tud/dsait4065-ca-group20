@@ -579,7 +579,7 @@ if __name__ == "__main__":
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
-            print(f"Stored resolved emotion → {final_emotion} ({final_distribution})")
+            print(f"Stored resolved emotion -> {final_emotion} ({final_distribution})")
 
             pending_clarification = None
 
