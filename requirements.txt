@@ -1,8 +1,8 @@
 # --- Core AI Framework ---
-# Locked to 2.3.1 to maintain compatibility with legacy audio tools
-torch==2.3.1
-torchaudio==2.3.1
-torchvision==0.18.1
+# Downgraded to 2.2.2 — torch 2.3.1 is not available on macOS via PyPI
+torch==2.2.2
+torchaudio==2.2.2
+torchvision==0.17.2
 
 # --- The NumPy 2.0 Fix ---
 # Must be <2.0. NumPy 2.0 fundamentally breaks DeepFace/SciPy/TensorFlow.
@@ -13,6 +13,9 @@ numpy<2
 transformers==4.38.0
 
 # --- Audio Processing & Recording ---
+# llvmlite 0.47+ has no pre-built wheel for macOS x86_64; pin to latest available binary
+llvmlite==0.45.1
+numba==0.62.1
 librosa>=0.10.1
 sounddevice>=0.4.6
 soundfile>=0.12.1
@@ -23,4 +26,5 @@ tf-keras
 opencv-python
 
 # --- TTS (Text-to-Speech) ---
-TTS==0.14.1
+# 0.14.1 requires Python <3.11; using latest compatible version
+TTS==0.22.0

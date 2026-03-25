@@ -737,6 +737,7 @@ if __name__ == "__main__":
         if final_emotion is not None and fused_dist:
             memory_data = fetch_temporal_memory(db, transcription, fused_dist)
             
+        print(f"\nPast retrieved memories: \n {memory_data}")    
         time_db = time.time() - t0
 
         # --- 6. THE LLM DIALOG MANAGER ---
