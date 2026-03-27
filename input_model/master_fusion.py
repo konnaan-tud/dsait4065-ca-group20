@@ -19,9 +19,7 @@ import requests
 from datetime import datetime
 from transformers import pipeline
 from deepface import DeepFace
-from prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
-from prosodic_modality.test_audeering import Wav2Small 
-from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
+from prosodic_modality.wavlm_cat import ProsodicCategorical
 from TTS.api import TTS
 import subprocess
 from confidence import is_confident, prune_low_confidence_modalities
@@ -112,8 +110,7 @@ def fetch_temporal_memory(db, current_text, current_emotion_dist):
 
     return memory_data
 
-def print_final_output(transcription, top_3_text, arousal, valence, dominance,
-                       ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
+def print_final_output(transcription, top_3_text, ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
         print("🤖 AGENT RESPONSE")
@@ -229,11 +226,11 @@ def model_initialization():
     stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
     print("  -> Loading DistilRoBERTa Text Emotions (7 Ekman)...")
     text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
-    print("  -> Loading Audeering Prosodic Emotions...")
-    audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
+    print("  -> Loading WavLM Prosodic Categorical Emotions...")
+    prosodic_model = ProsodicCategorical()
     tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
     #tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
-    return stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device
+    return stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
     os.makedirs("debug_frames", exist_ok=True)
@@ -453,7 +450,7 @@ if __name__ == "__main__":
     print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
     cap = cv2.VideoCapture(0)
     time.sleep(1)
-    stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device = model_initialization()
+    stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device = model_initialization()
     db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
     
     chat_history = [{"role": "system", "content": "Initializing..."}]
@@ -520,12 +517,6 @@ if __name__ == "__main__":
         is_recording = True
         video_frames = []
         audio_data = []
-        prosodic_predictor = ProsodyEmotionPredictor(device=device)
-        vad_mapper = VADEmotionMapper(
-            prototypes=load_vad_prototypes(os.path.join(os.path.dirname(__file__), "prosodic_modality", "vad_mapping.csv")), # prototypes=load_vad_prototypes("vad_mapping.csv"),
-            weights=(1.0,1.0,1.0),
-            temperature=0.25
-        )
     
         vt = threading.Thread(target=record_video, args=(video_frames, cap,))
         vt.daemon = True
@@ -639,17 +630,13 @@ if __name__ == "__main__":
         top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
         time_roberta = time.time() - t0
     
-        # 3. PROSODIC EMOTION (Audeering)
+        # 3. PROSODIC EMOTION (WavLM Categorical)
         t0 = time.time()
-        signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
-        with torch.no_grad():
-            logits = audeering_model(signal.to(device))
-        arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
-        ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
+        ekman_probs = prosodic_model.predict(AUDIO_FILE)
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
-        time_audeering = time.time() - t0
+        time_prosodic = time.time() - t0
         
         # 4. FACIAL EMOTION (DeepFace)
         t0 = time.time()
@@ -769,7 +756,7 @@ if __name__ == "__main__":
         )
         time_llm = time.time() - t0
 
-        print_final_output(transcription, top_3_text, arousal, valence, dominance,
+        print_final_output(transcription, top_3_text,
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data)
         save_debug_frames(video_frames, turn_counter)
@@ -806,13 +793,13 @@ if __name__ == "__main__":
         print("="*60)
         print(f"  - Whisper (Speech to Text) : {time_whisper:.2f} seconds")
         print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
-        print(f"  - Audeering (Audio Emotion): {time_audeering:.2f} seconds")
+        print(f"  - WavLM (Audio Emotion)    : {time_prosodic:.2f} seconds")
         print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
         print(f"  - ChromaDB (Memory Fetch)  : {time_db:.2f} seconds")
         print(f"  - LLM Generation           : {time_llm:.2f} seconds")
         print(f"  - TTS Generation           : {time_tts:.2f} seconds")
         print(f"  -------------------------------------------")
-        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm + time_tts
+        total_time = time_whisper + time_roberta + time_prosodic + time_deepface + time_db + time_llm + time_tts
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
         
