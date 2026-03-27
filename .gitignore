@@ -7,3 +7,4 @@ input_model/chroma_db/
 input_model/debug_frames/
 input_model/audio_recordings/
 sessions/
+input_model/output_wav.

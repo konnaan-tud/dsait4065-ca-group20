@@ -32,14 +32,16 @@ if [ -d "$AUDIO_RECORDINGS" ]; then
     rm -rf "$AUDIO_RECORDINGS"
 fi
 
-# 2. Run master_fusion_basic.py from its directory
-echo "Starting master_fusion_basic.py..."
-cd "$SCRIPT_DIR/input_model"
-"$SCRIPT_DIR/.venv/bin/python" master_fusion.py
-
-# 3. Save session artifacts under sessions/<participant_id>/
+# 2. Create session folder upfront so the log can be written during the run
 SAVE_PATH="$SESSIONS_DIR/$PARTICIPANT_ID"
 mkdir -p "$SAVE_PATH"
+
+# 3. Run master_fusion.py, capturing stdout+stderr to session.log while still printing to terminal
+echo "Starting master_fusion.py..."
+cd "$SCRIPT_DIR/input_model"
+"$SCRIPT_DIR/.venv/bin/python" -u master_fusion.py 2>&1 | tee "$SAVE_PATH/session.log"
+
+# 4. Save remaining session artifacts
 
 if [ -d "$CHROMA_DB" ]; then
     echo "Saving chroma_db state to $SAVE_PATH/chroma_db ..."
