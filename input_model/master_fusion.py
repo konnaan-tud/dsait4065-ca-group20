@@ -231,7 +231,8 @@ def model_initialization():
     text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
     print("  -> Loading Audeering Prosodic Emotions...")
     audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
-    tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
+    tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
+    #tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
     return stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
@@ -437,8 +438,16 @@ def generate_agent_reply(transcription, text_top, modalities,
     return agent_reply
 
 def text_to_speech(tts_model, sentence):
-    tts_model.tts_to_file(text=sentence, file_path="output.wav")
+    t0 = time.time()
+    tts_model.tts_to_file(
+        text=sentence, 
+        file_path="output.wav",
+        speed=0.5  
+    )
+    time_tts = time.time() - t0 # Stop timer
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return time_tts
 
 if __name__ == "__main__":
     print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
@@ -602,7 +611,8 @@ if __name__ == "__main__":
 
             print(f"🗣️ User Said: '{transcription}'")
             print(f"\n💬 Agent: {agent_reply}")
-            text_to_speech(tts_model, agent_reply)
+            time_tts = text_to_speech(tts_model, agent_reply)
+            print(f"⏱️ TTS Generation Latency: {time_tts:.2f} seconds")
             # 💡 FIX: Add the resolution turn to the summary queue before continuing!
             turns_for_summary.append(f"User: {transcription} [Detected Emotion: {final_emotion}]\nAgent: {agent_reply}")
             if len(turns_for_summary) >= 3:
@@ -763,7 +773,7 @@ if __name__ == "__main__":
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data)
         save_debug_frames(video_frames, turn_counter)
-        text_to_speech(tts_model, agent_reply)
+        time_tts = text_to_speech(tts_model, agent_reply)
 
         # --- HYBRID MEMORY: QUEUE FOR SUMMARY ---
         turns_for_summary.append(f"User: {transcription} [Detected Emotion: {final_emotion}]\nAgent: {agent_reply}")
@@ -800,8 +810,9 @@ if __name__ == "__main__":
         print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
         print(f"  - ChromaDB (Memory Fetch)  : {time_db:.2f} seconds")
         print(f"  - LLM Generation           : {time_llm:.2f} seconds")
+        print(f"  - TTS Generation           : {time_tts:.2f} seconds")
         print(f"  -------------------------------------------")
-        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm
+        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm + time_tts
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
         
