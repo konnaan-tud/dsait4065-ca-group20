@@ -268,21 +268,10 @@ def generate_agent_reply(transcription, text_top, modalities, final_emotion, cha
 
     # NORMAL FUSION (WITH MEMORY CHECK)
     else:
-        
-        memory_injection = f"""
-        [Hidden Memory Context]
-        The user is talking about: "{transcription}". 
-        Today, they are feeling ({final_emotion}). 
-        Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
-        CRITICAL RULE: DO NOT use the literal words '{final_emotion}' in your response. Paraphrase their emotional state using natural human language.
-        """
-
         contextual_user_message = f"""
         [Hidden Context for Agent]
         User emotional profile: "{emotion_profile_text}"
         Detected emotional state: {final_emotion if final_emotion else "uncertain"}
-        {memory_injection}
-
         User message: "{transcription}"
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
