@@ -5,7 +5,6 @@ transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
 transformers.modeling_utils.check_torch_load_is_safe = lambda: None
 
 import cv2
-import json
 import os
 import json
 import sounddevice as sd
@@ -73,39 +72,6 @@ def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     flat_distribution = {normalize_emotion(res["label"]): res["score"] for res in results}
     return predicted["label"], flat_distribution
 
-def fetch_temporal_memory(db, current_text, current_emotion_dist):
-    """Fetches past events and calculates the MAE emotional contradiction."""
-    memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
-    
-    try:
-        results = db.query(current_text, n_results=1)
-        
-        if results:
-            dist = results[0].get("distance", 999.0)
-            
-            if dist < SEMANTIC_DISTANCE_THRESHOLD:
-                past_event = results[0]
-                p_text = past_event.get("text", "")
-                
-                # Safely unpack the nested dictionary
-                p_dist = past_event.get("emotions", {}).get("emotion_distribution", {})
-                p_top = past_event.get("emotions", {}).get("final_emotion", "unknown")
-                
-                if p_dist:
-                    emotions_list = ["anger", "disgust", "fear", "joy", "sadness", "surprise", "neutral"]
-                    # Calculate Mean Absolute Error
-                    mae = sum(abs(current_emotion_dist.get(e, 0.0) - p_dist.get(e, 0.0)) for e in emotions_list) / 7.0
-                    
-                    memory_data = {
-                        "past_text": p_text,
-                        "mae": mae,
-                        "is_contradiction": mae > MEMORY_CONTRADICTION_THRESHOLD,
-                        "past_top": p_top
-                    }
-    except Exception as e:
-        pass
-
-    return memory_data
 
 def print_final_output(transcription, top_3_text, arousal, valence, dominance,
                        ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
@@ -144,17 +110,6 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
         for name, m in modalities.items():
             print(f" - {name}: {m['top']} (confidence={m['confidence']:.2f})")
         
-        # 💡 NEW: Cleanly print the Memory Match right here in the final output!
-        if memory_data and memory_data.get("past_text"):
-            print("\n🕰️ TEMPORAL MEMORY CHECK")
-            print(f"Past Event Matched: '{memory_data['past_text']}'")
-            print(f"Past Dominant Emo : {memory_data['past_top']}")
-            print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
-            if memory_data['is_contradiction']:
-                print(f"   ⚠️ Memory vs Present Events Contradiction Detected (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
-            else:
-                print(f"   ✅ Memory & Present Events Alignment Detected (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
-
 # --- 1. THREAD: VIDEO RECORDER ---
 def record_video(frames, cap):
     global is_recording
@@ -233,8 +188,7 @@ def process_video_frames(video_frames, cap):
 
     return top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff
 
-def generate_agent_reply(transcription, text_top, modalities,
-                         final_emotion, chat_history, decision, emotion_profile_text, memory_data=None):
+def generate_agent_reply(transcription, text_top, modalities, final_emotion, chat_history, decision, emotion_profile_text):
 
     global last_valid_agent_utterance
 
@@ -312,29 +266,14 @@ def generate_agent_reply(transcription, text_top, modalities,
 
     # NORMAL FUSION (WITH MEMORY CHECK)
     else:
-        memory_injection = ""
-        if memory_data and memory_data.get("past_text"):
-            past_text = memory_data["past_text"]
-            past_emo = memory_data["past_top"]
-            current_emo = final_emotion
-            
-            if memory_data.get("is_contradiction"):
-                memory_injection = f"""
-                [Hidden Memory Context]
-                The user is talking about: "{transcription}" and currently feeling {current_emo}. 
-                However, in the past, when they experienced a very similar event ("{past_text}"), they appeared to feel ({past_emo}). 
-                Strategy: Gently note that they are reacting differently this time compared to the past, and ask a curious clarification question to explore why this time feels different to them.
-                CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Describe the shift using natural, empathetic human language.
-                """
-            else:
-                memory_injection = f"""
-                [Hidden Memory Context]
-                The user is talking about: "{transcription}". 
-                In the past, when they experienced a very similar event ("{past_text}"), they felt {past_emo}. 
-                Today, they are feeling the exact same way ({current_emo}). 
-                Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
-                CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Paraphrase their emotional state using natural human language.
-                """
+        
+        memory_injection = f"""
+        [Hidden Memory Context]
+        The user is talking about: "{transcription}". 
+        Today, they are feeling ({final_emotion}). 
+        Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
+        CRITICAL RULE: DO NOT use the literal words '{final_emotion}' in your response. Paraphrase their emotional state using natural human language.
+        """
 
         contextual_user_message = f"""
         [Hidden Context for Agent]
@@ -381,14 +320,12 @@ if __name__ == "__main__":
     cap = cv2.VideoCapture(0)
     time.sleep(1)
     stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device = model_initialization()
-    db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
     
     chat_history = [{"role": "system", "content": "Initializing..."}]
     
     turn_counter = 1
 
     pending_clarification = None
-    pending_event = None
     
     print("\n" + "="*60)
     print("✅ SYSTEM READY. Awaiting your turn.")
@@ -479,8 +416,6 @@ if __name__ == "__main__":
 
             # 💡 FIX 1: Combine the two utterances into one "Document"
             # This ensures both the trigger and the explanation are searchable.
-            full_narrative = f"Initial Event: {pending_event['initial_text']} | Clarification: {transcription}"
-
             emotions_record = {
                 "final_emotion": final_emotion,
                 "emotion_distribution": final_distribution
@@ -489,12 +424,10 @@ if __name__ == "__main__":
             print(emotions_record)
 
             # 💡 FIX 2: Use the combined narrative as the primary Document
-            memory_data = fetch_temporal_memory(db, transcription, final_distribution)
-            db.add(full_narrative, emotions_record)
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
-            print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
+            print(f"Resolved emotion → {final_emotion} ({final_distribution})")
 
             pending_clarification = None
 
@@ -508,19 +441,8 @@ if __name__ == "__main__":
                 }},
                 chat_history=chat_history,
                 decision="resolved",
-                emotion_profile_text=emotion_profile_text,
-                memory_data=memory_data
-            )
-
-            # 💡 Cleanly print the memory check for resolved turns
-            if memory_data and memory_data.get("past_text"):
-                print("\n🕰️ TEMPORAL MEMORY CHECK (Detour Resolved)")
-                print(f"Past Event Matched: '{memory_data['past_text']}'")
-                print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
-                if memory_data['is_contradiction']:
-                    print(f"Result            : ⚠️ CONTRADICTION (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
-                else:
-                    print(f"Result            : ✅ ALIGNMENT (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
+                emotion_profile_text=emotion_profile_text
+                )
 
             print(f"🗣️ User Said: '{transcription}'")
             print(f"\n💬 Agent: {agent_reply}")
@@ -624,11 +546,6 @@ if __name__ == "__main__":
             emotion_profile_text = "Conflicting emotional signals across modalities."
             pending_clarification = "conflict"
 
-            pending_event = {
-                "initial_text": transcription,
-                "initial_state": "conflict"
-            }
-
         # CASE 3: AGREEMENT/PARTIAL AGREEMENT → FUSION
         else:
             final_emotion, fused_dist, weights = fuse_modalities(agreeing_modalities)
@@ -645,17 +562,8 @@ if __name__ == "__main__":
 
             emotion_profile_text = "\n".join(emotion_profile)
 
-        # --- 5. EPISODIC MEMORY (CHROMA DB) WITH MAE MATH ---
-        t0 = time.time()
-        memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
-        
-        # Only fetch memory if we actually have a confident present emotion!
-        if final_emotion is not None and fused_dist:
-            memory_data = fetch_temporal_memory(db, transcription, fused_dist)
-            
-        time_db = time.time() - t0
 
-        # --- 6. THE LLM DIALOG MANAGER ---
+        # --- 4. THE LLM DIALOG MANAGER ---
         t0 = time.time()
         agent_reply = generate_agent_reply(
             transcription=transcription, 
@@ -664,28 +572,15 @@ if __name__ == "__main__":
             chat_history=chat_history, 
             decision=decision,
             modalities=modalities, 
-            emotion_profile_text=emotion_profile_text, 
-            memory_data=memory_data
+            emotion_profile_text=emotion_profile_text
         )
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
-                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data)
+                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
         text_to_speech(tts_model, agent_reply)
-
-        # --- 7. STORE IN CHROMA ---
-        if final_emotion is not None and pending_clarification is None:
-            emotions_record = {
-                "final_emotion": final_emotion,
-                "emotion_distribution":  fused_dist
-            }
-            db.add(transcription, emotions_record)
-            print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
-            print(f"Stored FINAL emotion in Chroma → {final_emotion} ({fused_dist})")
-        else:
-            print("Skipping DB storage (no resolved emotion)")
 
         # --- PRINT LATENCY REPORT ---
         print("\n" + "="*60)
@@ -695,10 +590,9 @@ if __name__ == "__main__":
         print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
         print(f"  - Audeering (Audio Emotion): {time_audeering:.2f} seconds")
         print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
-        print(f"  - ChromaDB (Memory Fetch)  : {time_db:.2f} seconds")
         print(f"  - LLM Generation           : {time_llm:.2f} seconds")
         print(f"  -------------------------------------------")
-        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm
+        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_llm
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
         
