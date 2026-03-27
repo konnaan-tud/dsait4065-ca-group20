@@ -29,7 +29,9 @@ from fusion import fuse_modalities
 from database import PromptDatabase
 
 # --- CONFIGURATION ---
-AUDIO_FILE = "current_turn.wav"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(_BASE_DIR, 'audio_recordings')
+DEBUG_FRAMES_DIR = os.path.join(_BASE_DIR, 'debug_frames')
 SAMPLE_RATE = 16000
 # Changed to /chat to provide the skeleton for memory module
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -233,10 +235,10 @@ def model_initialization():
     return stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
-    os.makedirs("debug_frames", exist_ok=True)
+    os.makedirs(DEBUG_FRAMES_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     for i, frame in enumerate(video_frames):
-        cv2.imwrite(f"debug_frames/turn_{turn_counter}_{timestamp}_face_second_{i+1}.jpg", frame)
+        cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"turn_{turn_counter}_{timestamp}_face_second_{i+1}.jpg"), frame)
 
 def process_audio(audio_data):
     global is_recording
@@ -451,8 +453,9 @@ if __name__ == "__main__":
     cap = cv2.VideoCapture(0)
     time.sleep(1)
     stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device = model_initialization()
-    db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
-    
+    db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chroma_db'))
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+
     chat_history = [{"role": "system", "content": "Initializing..."}]
     
     turn_counter = 1
@@ -533,6 +536,7 @@ if __name__ == "__main__":
         # MOVED THIS HERE: Now it is completely safe from crashing!
         print("\nProcessing Turn... Please wait.")
         full_audio = np.concatenate(audio_data, axis=0)
+        AUDIO_FILE = os.path.join(AUDIO_DIR, f"turn_{turn_counter}.wav")
         sf.write(AUDIO_FILE, full_audio, SAMPLE_RATE)
     
         # --- RUN THE CLASSIFIERS (WITH TIMERS) ---
