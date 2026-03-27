@@ -39,7 +39,7 @@ mkdir -p "$SAVE_PATH"
 # 3. Run master_fusion.py, capturing stdout+stderr to session.log while still printing to terminal
 echo "Starting master_fusion.py..."
 cd "$SCRIPT_DIR/input_model"
-"$SCRIPT_DIR/.venv/bin/python" -u master_fusion.py 2>&1 | tee "$SAVE_PATH/session.log"
+script -q "$SAVE_PATH/session.log" python3 -u master_fusion.py
 
 # 4. Save remaining session artifacts
 
