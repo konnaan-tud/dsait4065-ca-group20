@@ -303,8 +303,11 @@ def generate_agent_reply(transcription, text_top, modalities, final_emotion, cha
     return agent_reply
 
 def text_to_speech(tts_model, sentence):
+    t0 = time.time()
     tts_model.tts_to_file(text=sentence, file_path="output.wav")
+    time_tts = time.time() - t0 # Stop timer
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return time_tts
 
 if __name__ == "__main__":
     print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
@@ -508,7 +511,6 @@ if __name__ == "__main__":
         fused_dist = {}
 
 
-
         # CASE 0: No confident modality
         if decision == "no_data":
             pending_clarification = "no_data"
@@ -574,7 +576,7 @@ if __name__ == "__main__":
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
-        text_to_speech(tts_model, agent_reply)
+        time_tts = text_to_speech(tts_model, agent_reply)
 
         # --- PRINT LATENCY REPORT ---
         print("\n" + "="*60)
@@ -585,6 +587,7 @@ if __name__ == "__main__":
         print(f"  - Audeering (Audio Emotion): {time_audeering:.2f} seconds")
         print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
         print(f"  - LLM Generation           : {time_llm:.2f} seconds")
+        print(f" -  TTS Generation Latency: {time_tts:.2f} seconds")
         print(f"  -------------------------------------------")
         total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_llm
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
