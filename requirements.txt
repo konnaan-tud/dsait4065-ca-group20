@@ -13,7 +13,7 @@ numpy<2
 transformers==4.38.0
 
 # --- Audio Processing & Recording ---
-librosa>=0.10.1
+librosa
 sounddevice>=0.4.6
 soundfile>=0.12.1
 
@@ -29,4 +29,4 @@ streamlit
 chromadb
 
 # --- TTS (Text-to-Speech) ---
-TTS
+TTS==0.14.2

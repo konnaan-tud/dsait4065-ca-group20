@@ -6,8 +6,17 @@ CHROMA_DB="$SCRIPT_DIR/input_model/chroma_db"
 DEBUG_FRAMES="$SCRIPT_DIR/input_model/debug_frames"
 AUDIO_RECORDINGS="$SCRIPT_DIR/input_model/audio_recordings"
 SESSIONS_DIR="$SCRIPT_DIR/sessions"
-PYTHON_EXEC="$SCRIPT_DIR/.venv/Scripts/python.exe"
-OS_NAME="$(uname -s)"
+# Auto-detect Python: macOS venv uses bin/python, Windows uses Scripts/python.exe
+if [ -f "$SCRIPT_DIR/venv/bin/python" ]; then
+    PYTHON_EXEC="$SCRIPT_DIR/venv/bin/python"
+elif [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON_EXEC="$SCRIPT_DIR/.venv/bin/python"
+elif [ -f "$SCRIPT_DIR/.venv/Scripts/python.exe" ]; then
+    PYTHON_EXEC="$SCRIPT_DIR/.venv/Scripts/python.exe"
+else
+    echo "ERROR: Could not find Python in venv or .venv"
+    exit 1
+fi
 
 # Generate a random participant ID (8 hex chars)
 PARTICIPANT_ID=$(openssl rand -hex 4)
@@ -42,8 +51,8 @@ LOG_FILE="$SAVE_PATH/session.log"
 # 3. Run master_fusion.py, capturing stdout+stderr to session.log while still printing to terminal
 echo "Starting master_fusion.py..."
 cd "$SCRIPT_DIR/input_model"
-if [ "$OS_NAME" = "Darwin" ]; then
-    script -q "$LOG_FILE" $PYTHON_EXEC -u master_fusion_basic.py
+if [ "$(uname -s)" = "Darwin" ]; then
+    script -q "$LOG_FILE" $PYTHON_EXEC -u master_fusion.py
 elif command -v script >/dev/null 2>&1; then
     # util-linux script syntax: -c runs command while recording the terminal session.
     script -q "$LOG_FILE" -c "$PYTHON_EXEC -u master_fusion.py"

@@ -50,10 +50,16 @@ narrative_summary = ""
 summary_lock = threading.Lock()
 turns_for_summary = [] # Buffer to hold the recent turns before summarizing
 
-# Helper function to print events Streamlit can lister for
+# Lock to prevent stdout race conditions between threads (e.g. background
+# summary thread printing at the same time as ui_event, which merges lines
+# and breaks the UI's event parser).
+_print_lock = threading.Lock()
+
+# Helper function to print events Streamlit can listen for
 def ui_event(event_type, **payload):
     event = {"type": event_type, **payload}
-    print("UI_EVENT::" + json.dumps(event), flush=True)
+    with _print_lock:
+        print("UI_EVENT::" + json.dumps(event), flush=True)
 
 # Maps modalities apparently not all modalities have the same name for emotions
 def normalize_emotion(label):
@@ -168,7 +174,8 @@ def print_final_output(transcription, top_3_text, ekman_probs_norm, avg_emotions
 # --- HYBRID MEMORY: ASYNCHRONOUS RUNNING SUMMARY ---
 def update_running_summary(recent_turns, current_summary):
     global narrative_summary
-    print("\n[Semantic Memory] Background thread summarizing recent turns...")
+    with _print_lock:
+        print("\n[Semantic Memory] Background thread summarizing recent turns...", flush=True)
     
     transcript = "\n".join(recent_turns)
     
@@ -211,9 +218,11 @@ def update_running_summary(recent_turns, current_summary):
         if new_summary:
             with summary_lock:
                 narrative_summary = new_summary
-            print(f"\n[Semantic Memory] Running Summary Updated in Background! (Latency: {time_summary:.2f} seconds)")
+            with _print_lock:
+                print(f"\n[Semantic Memory] Running Summary Updated in Background! (Latency: {time_summary:.2f} seconds)", flush=True)
     except Exception as e:
-        print(f"\n[Semantic Memory] Summary update failed: {e}")
+        with _print_lock:
+            print(f"\n[Semantic Memory] Summary update failed: {e}", flush=True)
 
 # --- 1. THREAD: VIDEO RECORDER ---
 def record_video(frames, cap):

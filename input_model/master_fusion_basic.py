@@ -45,10 +45,16 @@ MEMORY_CONTRADICTION_THRESHOLD = 0.20 # MAE threshold for triggering the Curiosi
 is_recording = False
 last_valid_agent_utterance = ""  # 💡 Added this variable to track the conversation!
 
+# Lock to prevent stdout race conditions between threads (e.g. background
+# threads printing at the same time as ui_event, which merges lines
+# and breaks the UI's event parser).
+_print_lock = threading.Lock()
+
 # Helper function to print events Streamlit can listen for.
 def ui_event(event_type, **payload):
     event = {"type": event_type, **payload}
-    print("UI_EVENT::" + json.dumps(event), flush=True)
+    with _print_lock:
+        print("UI_EVENT::" + json.dumps(event), flush=True)
 
 # Maps modalities apparently not all modalities have the same name for emotions
 def normalize_emotion(label):

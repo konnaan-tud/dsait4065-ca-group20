@@ -327,8 +327,14 @@ def pump_queues():
         except queue.Empty:
             break
 
-        if raw.startswith(EVENT_PREFIX):
-            payload = raw[len(EVENT_PREFIX):].strip()
+        if EVENT_PREFIX in raw:
+            # Extract event from wherever it appears in the line.
+            # A threading race condition in master_fusion.py can cause
+            # another thread's output to be prepended to the event line.
+            idx = raw.index(EVENT_PREFIX)
+            if idx > 0:
+                log(raw[:idx])
+            payload = raw[idx + len(EVENT_PREFIX):].strip()
             event = safe_json_loads(payload)
             if event is not None:
                 handle_event(event)
