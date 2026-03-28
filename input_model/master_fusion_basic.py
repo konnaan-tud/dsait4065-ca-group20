@@ -422,7 +422,7 @@ if __name__ == "__main__":
         time_whisper = time.time() - t0
         
         if not transcription:
-            print("⚠️ Whisper didn't hear any words. Try speaking louder.")
+            print("Whisper didn't hear any words. Try speaking louder.")
             continue
 
         # Handle reply of user in case of conflict
@@ -447,7 +447,7 @@ if __name__ == "__main__":
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
-            print(f"Resolved emotion → {final_emotion} ({final_distribution})")
+            print(f"Resolved emotion -> {final_emotion} ({final_distribution})")
 
             pending_clarification = None
 
