@@ -6,6 +6,7 @@ import queue
 import signal
 import threading
 import subprocess
+import shutil
 from pathlib import Path
 from collections import deque
 
@@ -15,9 +16,14 @@ import streamlit as st
 # ============================================================
 # CONFIG
 # ============================================================
-TARGET_SCRIPT = "master_fusion_basic.py"   # <-- change if needed
+TARGET_SCRIPT = "master_fusion.py"
+# TARGET_SCRIPT = "master_fusion_basic.py"
 ROOT_DIR = Path(__file__).resolve().parent
 SCRIPT_PATH = ROOT_DIR / TARGET_SCRIPT
+PROJECT_DIR = ROOT_DIR.parent
+SESSION_RUNNER_SCRIPT = PROJECT_DIR / (
+    "run_session_basic.sh" if TARGET_SCRIPT == "master_fusion_basic.py" else "run_session.sh"
+)
 MAX_LOG_LINES = 3000
 MAX_CHAT_MESSAGES = 200
 AUTO_REFRESH_SECONDS = 0.7
@@ -163,6 +169,44 @@ def handle_event(event: dict):
 EVENT_PREFIX = "UI_EVENT::"
 
 
+def detect_bash_executable():
+    # Prefer Git Bash first; handle WSL bash separately.
+    git_bash_candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    for candidate in git_bash_candidates:
+        if Path(candidate).exists():
+            return "git", candidate
+
+    bash_from_path = shutil.which("bash")
+    if not bash_from_path:
+        return None, None
+
+    bash_norm = bash_from_path.replace("/", "\\").lower()
+    if bash_norm.endswith("\\windows\\system32\\bash.exe"):
+        return "wsl", bash_from_path
+    return "git", bash_from_path
+
+
+def to_msys_path(path: Path) -> str:
+    resolved = str(path.resolve()).replace("\\", "/")
+    if len(resolved) >= 2 and resolved[1] == ":":
+        drive = resolved[0].lower()
+        tail = resolved[2:]
+        return f"/{drive}{tail}"
+    return resolved
+
+
+def to_wsl_path(path: Path) -> str:
+    resolved = str(path.resolve()).replace("\\", "/")
+    if len(resolved) >= 2 and resolved[1] == ":":
+        drive = resolved[0].lower()
+        tail = resolved[2:]
+        return f"/mnt/{drive}{tail}"
+    return resolved
+
+
 def pump_queues():
     changed = False
 
@@ -206,11 +250,6 @@ def pump_queues():
 
 
 def start_process():
-    if not SCRIPT_PATH.exists():
-        log(f"[system] Script not found: {SCRIPT_PATH}")
-        st.session_state.latest_status = "Script not found"
-        return
-
     if st.session_state.process_running:
         log("[system] Process is already running.")
         return
@@ -218,9 +257,33 @@ def start_process():
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
+    launch_cmd = None
+    launch_cwd = str(ROOT_DIR)
+
+    if SESSION_RUNNER_SCRIPT.exists():
+        bash_kind, bash_exe = detect_bash_executable()
+        if bash_exe:
+            if bash_kind == "wsl":
+                runner_path = to_wsl_path(SESSION_RUNNER_SCRIPT)
+            else:
+                runner_path = to_msys_path(SESSION_RUNNER_SCRIPT)
+            launch_cmd = [bash_exe, "-lc", f"'{runner_path}'"]
+            launch_cwd = str(PROJECT_DIR)
+            log(f"[system] Launching via session runner ({bash_kind} bash): {SESSION_RUNNER_SCRIPT.name}")
+        else:
+            log("[system] Bash not found; falling back to direct Python launch.")
+
+    if launch_cmd is None:
+        if not SCRIPT_PATH.exists():
+            log(f"[system] Script not found: {SCRIPT_PATH}")
+            st.session_state.latest_status = "Script not found"
+            return
+        launch_cmd = [sys.executable, str(SCRIPT_PATH)]
+        launch_cwd = str(ROOT_DIR)
+
     process = subprocess.Popen(
-        [sys.executable, str(SCRIPT_PATH)],
-        cwd=str(ROOT_DIR),
+        launch_cmd,
+        cwd=launch_cwd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -248,7 +311,7 @@ def start_process():
     st.session_state.reader_thread.start()
     st.session_state.stderr_thread.start()
 
-    log(f"[system] Started process: {SCRIPT_PATH.name}")
+    log(f"[system] Started process: {' '.join(launch_cmd)}")
 
 
 def stop_process():
