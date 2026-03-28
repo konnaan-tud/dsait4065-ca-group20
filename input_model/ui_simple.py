@@ -53,6 +53,7 @@ def init_state():
         "last_event_time": None,
         "show_debug": False,
         "interaction_state": "idle",  # idle|starting|awaiting_start|recording|processing|stopping
+        "pending_farewell": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -135,6 +136,7 @@ def handle_event(event: dict):
         st.session_state.current_turn_id = event.get("turn_id")
         st.session_state.latest_status = "Listening"
         st.session_state.interaction_state = "recording"
+        st.session_state.pending_farewell = False
 
     elif etype == "transcription":
         text = event.get("text")
@@ -147,6 +149,7 @@ def handle_event(event: dict):
         text = event.get("text")
         st.session_state.latest_agent_reply = text
         st.session_state.latest_status = "Agent replied"
+        st.session_state.pending_farewell = False
         add_chat_message("assistant", text, st.session_state.current_turn_id)
 
     elif etype == "latency":
@@ -194,6 +197,7 @@ def pump_queues():
     if proc is not None and proc.poll() is not None and st.session_state.process_running:
         st.session_state.process_running = False
         st.session_state.interaction_state = "idle"
+        st.session_state.pending_farewell = False
         st.session_state.latest_status = f"Process exited ({proc.returncode})"
         log(f"[system] Process exited with code {proc.returncode}")
         changed = True
@@ -293,6 +297,7 @@ def stop_speaking():
 def quit_gracefully():
     st.session_state.latest_status = "Quitting"
     st.session_state.interaction_state = "stopping"
+    st.session_state.pending_farewell = True
     send_stdin("q\n")
 
 
@@ -303,6 +308,7 @@ def reset_chat():
     st.session_state.latest_transcription = None
     st.session_state.latest_agent_reply = None
     st.session_state.current_turn_id = None
+    st.session_state.pending_farewell = False
     clear_queue(st.session_state.stdout_queue)
     clear_queue(st.session_state.stderr_queue)
     if st.session_state.process_running:
@@ -314,6 +320,13 @@ def reset_chat():
 
 
 def is_waiting_for_agent_reply() -> bool:
+    if (
+        st.session_state.process_running
+        and st.session_state.interaction_state == "stopping"
+        and st.session_state.pending_farewell
+    ):
+        return True
+
     turn_id = st.session_state.current_turn_id
     if turn_id is None:
         return False
@@ -437,7 +450,7 @@ with chat_box:
 st.write("")
 
 # Main controls for participant-facing UI
-col1, col2 = st.columns(2, gap="medium")
+col1, col2, col3 = st.columns(3, gap="medium")
 with col1:
     can_start = st.session_state.process_running and st.session_state.interaction_state == "awaiting_start"
     if st.button(
@@ -459,31 +472,25 @@ with col2:
         ui_action_taken = True
         stop_speaking()
 
+with col3:
+    can_end = st.session_state.process_running and st.session_state.interaction_state == "awaiting_start"
+    if st.button(
+        "End conversation",
+        width="stretch",
+        disabled=not can_end,
+    ):
+        ui_action_taken = True
+        quit_gracefully()
+
 st.markdown('<div class="control-hint">Press start, speak, then press stop when you are done.</div>', unsafe_allow_html=True)
 
 st.write("")
 
 # Secondary controls hidden away from the main interaction flow
 with st.expander("Session controls", expanded=False):
-    a, b, c = st.columns(3, gap="small")
-    with a:
-        if st.button("Launch agent", width="stretch"):
-            ui_action_taken = True
-            start_process()
-    with b:
-        if st.button("Quit gracefully", width="stretch", disabled=not st.session_state.process_running):
-            ui_action_taken = True
-            quit_gracefully()
-    with c:
-        if st.button("Stop process", width="stretch", disabled=not st.session_state.process_running):
-            ui_action_taken = True
-            stop_process()
-
-    d, e = st.columns(2, gap="small")
-    with d:
-        if st.button("Reset chat view", width="stretch"):
-            ui_action_taken = True
-            reset_chat()
+    if st.button("Launch agent", width="stretch"):
+        ui_action_taken = True
+        start_process()
 
 st.markdown('</div>', unsafe_allow_html=True)
 

@@ -493,15 +493,21 @@ if __name__ == "__main__":
             
             chat_history.append({"role": "user", "content": final_prompt})
             payload = {"model": "llama3", "messages": chat_history, "stream": False, "think": False}
+            farewell_msg = "Thank you for chatting with me. Take care!"
             
             try:
                 response = requests.post(OLLAMA_URL, json=payload)
-                farewell_msg = response.json().get("message", {}).get("content", "Thank you for chatting with me. Take care!")
-                print("\n" + "="*60)
-                print(f"Agent: {farewell_msg}")
-                print("="*60 + "\n")
+                farewell_msg = response.json().get("message", {}).get("content", farewell_msg)
             except Exception as e:
-                print("\nAgent: Thank you so much for chatting with me today. Take care of yourself!")
+                farewell_msg = "Thank you so much for chatting with me today. Take care of yourself!"
+
+            print("\n" + "="*60)
+            print(f"Agent: {farewell_msg}")
+            print("="*60 + "\n")
+            try:
+                text_to_speech(tts_model, farewell_msg)
+            except Exception as e:
+                print(f"Farewell TTS failed: {e}")
 
             # --- SAVE THE SUMMARY TO DISK ---
             if final_summary:
