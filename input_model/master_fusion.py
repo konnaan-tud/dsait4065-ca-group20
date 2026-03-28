@@ -20,9 +20,7 @@ import requests
 from datetime import datetime
 from transformers import pipeline
 from deepface import DeepFace
-from prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
-from prosodic_modality.test_audeering import Wav2Small 
-from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
+from prosodic_modality.wavlm_cat import ProsodicCategorical
 from TTS.api import TTS
 import subprocess
 from confidence import is_confident, prune_low_confidence_modalities
@@ -32,7 +30,9 @@ from fusion import fuse_modalities
 from database import PromptDatabase
 
 # --- CONFIGURATION ---
-AUDIO_FILE = "current_turn.wav"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(_BASE_DIR, 'audio_recordings')
+DEBUG_FRAMES_DIR = os.path.join(_BASE_DIR, 'debug_frames')
 SAMPLE_RATE = 16000
 # Changed to /chat to provide the skeleton for memory module
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -118,8 +118,7 @@ def fetch_temporal_memory(db, current_text, current_emotion_dist):
 
     return memory_data
 
-def print_final_output(transcription, top_3_text, arousal, valence, dominance,
-                       ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
+def print_final_output(transcription, top_3_text, ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
         print("AGENT RESPONSE")
@@ -177,11 +176,16 @@ def update_running_summary(recent_turns, current_summary):
     You are managing the Semantic Memory for an empathetic AI agent. 
     Update the user's psychological profile based on the new dialogue.
 
+    CRITICAL RULES:
+    1. Base your summary ONLY on the User's text and the [Detected Emotion] tags provided. 
+    2. Do NOT record the Agent's assumptions, metaphors, or words as facts about the user.
+    3. PRESERVE FOUNDATIONAL CONTEXT: Never delete the initial problem or root cause (e.g., past struggles, burnout, why they were sad initially) just because their current mood improved. Keep the full narrative arc.
+
     You MUST structure your response EXACTLY in these two bulleted sections:
-    1. Core Facts & Context: (Preserve specific details, nouns, and events mentioned by the user. Add new facts without deleting important old ones. Maximum 4 bullet points).
-    2. Emotional Trajectory: (Analyze how their mood or core struggle is shifting right now. Maximum 2 bullet points).
+    1. Core Facts & Context: (Preserve specific details, nouns, and the root cause of their situation. Add new facts without deleting important foundational context. Maximum 4 bullet points).
+    2. Emotional Trajectory: (Analyze how their mood is shifting over time. You MUST incorporate the provided [Detected Emotion] labels to describe their true state. Maximum 2 bullet points).
     
-    IMPORTANT: Output ONLY the two bulleted sections. Do not include introductory phrases like "Here is the summary".
+    IMPORTANT: Output ONLY the two bulleted sections. Do not include introductory phrases.
     
     Previous Profile:
     {current_summary if current_summary else "None (Beginning of conversation)"}
@@ -231,16 +235,17 @@ def model_initialization():
     stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
     print("  -> Loading DistilRoBERTa Text Emotions (7 Ekman)...")
     text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
-    print("  -> Loading Audeering Prosodic Emotions...")
-    audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
-    tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
-    return stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device
+    print("  -> Loading WavLM Prosodic Categorical Emotions...")
+    prosodic_model = ProsodicCategorical()
+    tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
+    #tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
+    return stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
-    os.makedirs("debug_frames", exist_ok=True)
+    os.makedirs(DEBUG_FRAMES_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     for i, frame in enumerate(video_frames):
-        cv2.imwrite(f"debug_frames/turn_{turn_counter}_{timestamp}_face_second_{i+1}.jpg", frame)
+        cv2.imwrite(os.path.join(DEBUG_FRAMES_DIR, f"turn_{turn_counter}_{timestamp}_face_second_{i+1}.jpg"), frame)
 
 def process_audio(audio_data):
     global is_recording
@@ -306,9 +311,9 @@ def generate_agent_reply(transcription, text_top, modalities,
     base_system = """You are an empathetic, human-like conversational partner. Your goal is to establish "common ground" with the user regarding their emotional story. 
     
     CRITICAL RULES:
-    1. Acknowledge their situation gracefully, but NEVER use the exact emotion labels provided in your hidden context (e.g., do not say "You are feeling anger/neutral").
-    2. NEVER start your sentences with cliché therapy phrases like "It sounds like...", "I sense...", or "I hear you saying...". Speak naturally like a friend.
-    3. Ask one gentle and simple clarification question to keep the narrative flowing.
+    1. Acknowledge their situation gracefully, but don't use the exact emotion labels provided in your hidden context (e.g., do not say "You are feeling anger/neutral").
+    2. Start your sentences directly and naturally like a friend, avoiding robotic therapy phrasing.
+    3. NARRATIVE & EMOTION BALANCE: Ask one engaging follow-up question that connects their feelings to the actual events or people involved. Instead of just asking "how does that make you feel?", ask about the specific actions or moments that drove those feelings.
     4. Keep your response strictly under 3 sentences."""
     
     summary_injection = f"\n\n[Running Summary (Semantic Memory)]:\n{current_summary}" if current_summary else ""
@@ -351,11 +356,12 @@ def generate_agent_reply(transcription, text_top, modalities,
         User's true emotion: {text_top}
 
         Instructions:
-        - Briefly validate their true feeling (e.g., "Thank you for clarifying...").
-        - IMPORTANT: We just took a brief detour. You need to return to the conversation. 
-        - The last topic or question you were discussing before the detour was: "{last_valid_agent_utterance}"
+        - Empathetically acknowledge whatever they just said (whether they named a specific feeling or admitted they don't know). 
+        - CRITICAL RULE: Do NOT use robotic phrases like "Thank you for clarifying." Respond like a supportive human friend.
+        - IMPORTANT: You need to seamlessly return to the main conversation. 
+        - The last thing you were discussing before the detour was: "{last_valid_agent_utterance}"
         - Naturally transition BACK to that topic or continue the thought. 
-        - Keep it seamless and conversational, strictly under 3 sentences.
+        - Keep it compassionate, conversational, and strictly under 3 sentences.
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
@@ -369,7 +375,7 @@ def generate_agent_reply(transcription, text_top, modalities,
             Instructions:
             - Be honest that you're not fully sure how they're feeling.
             - Ask a gentle, open-ended clarification question.
-            - Do NOT guess or force an emotion.
+            - Do NOT guess or force an emotion. Focus solely on their spoken words to guide your response, rather than assigning them an emotion.
             - Keep it natural and under 3 sentences.
             """
         print(contextual_user_message)
@@ -387,16 +393,16 @@ def generate_agent_reply(transcription, text_top, modalities,
                 memory_injection = f"""
                 [Hidden Memory Context]
                 The user is talking about: "{transcription}" and currently feeling {current_emo}. 
-                However, in the past, when they experienced a very similar event ("{past_text}"), they appeared to feel ({past_emo}). 
-                Strategy: Gently note that they are reacting differently this time compared to the past, and ask a curious clarification question to explore why this time feels different to them.
+                Earlier in this exact same conversation, when they mentioned ("{past_text}"), they appeared to feel ({past_emo}). 
+                Strategy: Gently note how their emotional state has shifted as they continued talking, and ask a curious clarification question to explore this transition.
                 CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Describe the shift using natural, empathetic human language.
                 """
             else:
                 memory_injection = f"""
                 [Hidden Memory Context]
                 The user is talking about: "{transcription}". 
-                In the past, when they experienced a very similar event ("{past_text}"), they felt {past_emo}. 
-                Today, they are feeling the exact same way ({current_emo}). 
+                Earlier in this conversation, when they mentioned ("{past_text}"), they felt {past_emo}. 
+                Right now, they are feeling the exact same way ({current_emo}). 
                 Strategy: Validate their feelings by explicitly acknowledging this pattern. Show them that it makes complete sense they feel this way again, and ask a gentle question to comfort them.
                 CRITICAL RULE: DO NOT use the literal words '{past_emo}' or '{current_emo}' in your response. Paraphrase their emotional state using natural human language.
                 """
@@ -438,18 +444,26 @@ def generate_agent_reply(transcription, text_top, modalities,
     return agent_reply
 
 def text_to_speech(tts_model, sentence):
-    tts_model.tts_to_file(text=sentence, file_path="output.wav")
-    # Emit right before playback so UI and audible response are aligned.
+    t0 = time.time()
+    tts_model.tts_to_file(
+        text=sentence, 
+        file_path="output.wav",
+        speed=0.5  
+    )
+    time_tts = time.time() - t0 # Stop timer
     ui_event("agent_reply", text=sentence)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return time_tts
 
 if __name__ == "__main__":
     print("Initializing webcam (Please click 'OK' if Mac asks for permission)...")
     cap = cv2.VideoCapture(0)
     time.sleep(1)
-    stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device = model_initialization()
-    db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'chroma_db'))
-    
+    stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device = model_initialization()
+    db = PromptDatabase(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chroma_db'))
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+
     chat_history = [{"role": "system", "content": "Initializing..."}]
     
     turn_counter = 1
@@ -525,12 +539,6 @@ if __name__ == "__main__":
         is_recording = True
         video_frames = []
         audio_data = []
-        prosodic_predictor = ProsodyEmotionPredictor(device=device)
-        vad_mapper = VADEmotionMapper(
-            prototypes=load_vad_prototypes(os.path.join(os.path.dirname(__file__), "prosodic_modality", "vad_mapping.csv")), # prototypes=load_vad_prototypes("vad_mapping.csv"),
-            weights=(1.0,1.0,1.0),
-            temperature=0.25
-        )
     
         vt = threading.Thread(target=record_video, args=(video_frames, cap,))
         vt.daemon = True
@@ -547,6 +555,7 @@ if __name__ == "__main__":
         # MOVED THIS HERE: Now it is completely safe from crashing!
         print("\nProcessing Turn... Please wait.")
         full_audio = np.concatenate(audio_data, axis=0)
+        AUDIO_FILE = os.path.join(AUDIO_DIR, f"turn_{turn_counter}.wav")
         sf.write(AUDIO_FILE, full_audio, SAMPLE_RATE)
     
         # --- RUN THE CLASSIFIERS (WITH TIMERS) ---
@@ -617,9 +626,10 @@ if __name__ == "__main__":
 
             print(f"User Said: '{transcription}'")
             print(f"\nAgent: {agent_reply}")
-            text_to_speech(tts_model, agent_reply)
+            time_tts = text_to_speech(tts_model, agent_reply)
+            print(f"TTS Generation Latency: {time_tts:.2f} seconds")
             # 💡 FIX: Add the resolution turn to the summary queue before continuing!
-            turns_for_summary.append(f"User: {transcription}\nAgent: {agent_reply}")
+            turns_for_summary.append(f"User: {transcription} [Detected Emotion: {final_emotion}]\nAgent: {agent_reply}")
             if len(turns_for_summary) >= 3:
                 with summary_lock:
                     current_sum = narrative_summary
@@ -648,13 +658,9 @@ if __name__ == "__main__":
         )
         time_roberta = time.time() - t0
     
-        # 3. PROSODIC EMOTION (Audeering)
+        # 3. PROSODIC EMOTION (WavLM Categorical)
         t0 = time.time()
-        signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
-        with torch.no_grad():
-            logits = audeering_model(signal.to(device))
-        arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
-        ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
+        ekman_probs = prosodic_model.predict(AUDIO_FILE)
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
         ui_event(
@@ -663,7 +669,7 @@ if __name__ == "__main__":
         )
 
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
-        time_audeering = time.time() - t0
+        time_prosodic = time.time() - t0
         
         # 4. FACIAL EMOTION (DeepFace)
         t0 = time.time()
@@ -824,14 +830,14 @@ if __name__ == "__main__":
         )
         time_llm = time.time() - t0
 
-        print_final_output(transcription, top_3_text, arousal, valence, dominance,
+        print_final_output(transcription, top_3_text,
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data)
         save_debug_frames(video_frames, turn_counter)
-        text_to_speech(tts_model, agent_reply)
+        time_tts = text_to_speech(tts_model, agent_reply)
 
         # --- HYBRID MEMORY: QUEUE FOR SUMMARY ---
-        turns_for_summary.append(f"User: {transcription}\nAgent: {agent_reply}")
+        turns_for_summary.append(f"User: {transcription} [Detected Emotion: {final_emotion}]\nAgent: {agent_reply}")
         if len(turns_for_summary) >= 3:
             with summary_lock:
                 current_sum = narrative_summary
@@ -861,12 +867,13 @@ if __name__ == "__main__":
         print("="*60)
         print(f"  - Whisper (Speech to Text) : {time_whisper:.2f} seconds")
         print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
-        print(f"  - Audeering (Audio Emotion): {time_audeering:.2f} seconds")
+        print(f"  - WavLM (Audio Emotion)    : {time_prosodic:.2f} seconds")
         print(f"  - DeepFace (Video Emotion) : {time_deepface:.2f} seconds ({valid_frames} frames processed)")
         print(f"  - ChromaDB (Memory Fetch)  : {time_db:.2f} seconds")
         print(f"  - LLM Generation           : {time_llm:.2f} seconds")
+        print(f"  - TTS Generation           : {time_tts:.2f} seconds")
         print(f"  -------------------------------------------")
-        total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_db + time_llm
+        total_time = time_whisper + time_roberta + time_prosodic + time_deepface + time_db + time_llm + time_tts
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
         ui_event(
@@ -874,7 +881,7 @@ if __name__ == "__main__":
             items={
                 "whisper": float(time_whisper),
                 "text_emotion": float(time_roberta),
-                "audio_emotion": float(time_audeering),
+                "audio_emotion": float(time_prosodic),
                 "video_emotion": float(time_deepface),
                 "memory_fetch": float(time_db),
                 "llm": float(time_llm),
