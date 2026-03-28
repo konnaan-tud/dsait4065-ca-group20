@@ -237,8 +237,8 @@ def model_initialization():
     text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
     print("  -> Loading WavLM Prosodic Categorical Emotions...")
     prosodic_model = ProsodicCategorical()
-    tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
-    #tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
+    #tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
+    tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
     return stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):

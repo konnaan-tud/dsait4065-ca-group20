@@ -45,6 +45,11 @@ MEMORY_CONTRADICTION_THRESHOLD = 0.20 # MAE threshold for triggering the Curiosi
 is_recording = False
 last_valid_agent_utterance = ""  # 💡 Added this variable to track the conversation!
 
+# Helper function to print events Streamlit can listen for.
+def ui_event(event_type, **payload):
+    event = {"type": event_type, **payload}
+    print("UI_EVENT::" + json.dumps(event), flush=True)
+
 # Maps modalities apparently not all modalities have the same name for emotions
 def normalize_emotion(label):
     mapping = {
@@ -79,33 +84,33 @@ def print_final_output(transcription, top_3_text, arousal, valence, dominance,
                        ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
-        print("🤖 AGENT RESPONSE")
+        print("AGENT RESPONSE")
         print("="*60)
 
-        print(f"🗣️ User Said: '{transcription}'")
-        print(f"\n💬 Agent: {agent_reply}")
+        print(f"User Said: '{transcription}'")
+        print(f"\nAgent: {agent_reply}")
 
-        print("\n📖 TEXT MODALITY:")
+        print("\nTEXT MODALITY:")
         for emo,score in top_3_text:
             print(f"   {emo}: {score:.2f}")
 
-        print("\n🎵 AUDIO MODALITY:")
+        print("\nAUDIO MODALITY:")
         print("   Ekman probabilities:")
         for emo, score in ekman_probs_norm.items():
             print(f"   {emo}: {score:.2f}")
 
-        print("\n🎭 VIDEO MODALITY:")
+        print("\nVIDEO MODALITY:")
         if valid_frames>0:
             sorted_face=sorted(avg_emotions.items(), key=lambda x:x[1], reverse=True)
             for emo,score in sorted_face[:3]:
                 print(f"   {emo}: {score:.2f}")
 
-        print("\n🔎 CONFIDENCE CHECK")
+        print("\nCONFIDENCE CHECK")
         print(f"Text confident  : {text_confident} (diff={text_diff:.2f})")
         print(f"Audio confident : {audio_confident} (diff={audio_diff:.2f})")
         print(f"Face confident  : {face_confident} (diff={face_diff:.2f})")
 
-        print("\n🧠 DECISION DEBUG")
+        print("\nDECISION DEBUG")
         print(f"Decision type: {decision}")
         print(f"Number of confident modalities: {len(modalities)}")
 
@@ -126,7 +131,7 @@ def record_video(frames, cap):
 
 # --- 3. MODEL INITIALIZATION ---
 def model_initialization():
-    print("🧠 Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
+    print("Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print("  -> Loading Whisper...")
     stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
@@ -151,10 +156,10 @@ def process_audio(audio_data):
             audio_data.append(indata.copy())
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=audio_callback):
-        print("\n🔴 Recording! Speak naturally.")
-        input("🛑 Press [ENTER] when you are finished talking...\n")
+        print("\nRecording! Speak naturally.")
+        input("Press [ENTER] when you are finished talking...\n")
         
-    print("\n✅ Recording stopped.")
+    print("\nRecording stopped.")
     is_recording = False
 
 def process_video_frames(video_frames, cap):
@@ -194,7 +199,7 @@ def generate_agent_reply(transcription, text_top, modalities, final_emotion, cha
 
     global last_valid_agent_utterance
 
-    print("\n🧠 Sending profile to LLM...")
+    print("\nSending profile to LLM...")
 
     # --- DYNAMIC SYSTEM PROMPT INJECTION ---
     base_system = """You are an empathetic, human-like conversational partner. Your goal is to establish "common ground" with the user regarding their emotional story.
@@ -306,11 +311,12 @@ def text_to_speech(tts_model, sentence):
     t0 = time.time()
     tts_model.tts_to_file(text=sentence, file_path="output.wav")
     time_tts = time.time() - t0 # Stop timer
+    ui_event("agent_reply", text=sentence)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return time_tts
 
 if __name__ == "__main__":
-    print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
+    print("Initializing webcam (Please click 'OK' if Mac asks for permission)...")
     cap = cv2.VideoCapture(0)
     time.sleep(1)
     stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device = model_initialization()
@@ -324,17 +330,19 @@ if __name__ == "__main__":
     pending_clarification = None
     
     print("\n" + "="*60)
-    print("✅ SYSTEM READY. Awaiting your turn.")
+    print("SYSTEM READY. Awaiting your turn.")
     print("="*60 + "\n")
     
     while True:
 
+        ui_event("awaiting_start", turn_id=turn_counter)
+
         print("\n" + "-"*60)
-        user_cmd = input(f"🟢 TURN {turn_counter} | Press [ENTER] to start speaking (or type 'q' to quit): ")
+        user_cmd = input(f"TURN {turn_counter} | Press [ENTER] to start speaking (or type 'q' to quit): ")
         
        # --- SESSION SAVE ON QUIT ---
         if user_cmd.strip().lower() == 'q':
-            print("\n👋 Wrapping up the conversation... Please wait a moment.")
+            print("\nWrapping up the conversation... Please wait a moment.")
 
             # --- GENERATE THE FINAL GOODBYE MESSAGE ---
             final_prompt = """
@@ -351,17 +359,25 @@ if __name__ == "__main__":
 
             chat_history.append({"role": "user", "content": final_prompt})
             payload = {"model": "llama3", "messages": chat_history, "stream": False, "think": False}
+            farewell_msg = "Thank you for chatting with me. Take care!"
 
             try:
                 response = requests.post(OLLAMA_URL, json=payload)
-                farewell_msg = response.json().get("message", {}).get("content", "Thank you for chatting with me. Take care!")
-                print("\n" + "="*60)
-                print(f"💬 Agent: {farewell_msg}")
-                print("="*60 + "\n")
+                farewell_msg = response.json().get("message", {}).get("content", farewell_msg)
             except Exception as e:
-                print("\n💬 Agent: Thank you so much for chatting with me today. Take care of yourself!")
+                farewell_msg = "Thank you so much for chatting with me today. Take care of yourself!"
+
+            print("\n" + "="*60)
+            print(f"Agent: {farewell_msg}")
+            print("="*60 + "\n")
+            try:
+                text_to_speech(tts_model, farewell_msg)
+            except Exception as e:
+                print(f"Farewell TTS failed: {e}")
 
             break # Exit the while loop
+
+        ui_event("turn_start", turn_id=turn_counter)
         
         is_recording = True
         video_frames = []
@@ -382,7 +398,7 @@ if __name__ == "__main__":
         vt.join(timeout=2.0)
 
         if len(audio_data) == 0:
-            print("⚠️ No audio detected. Try again.")
+            print("No audio detected. Try again.")
             continue
  
         # MOVED THIS HERE: Now it is completely safe from crashing!
@@ -396,6 +412,7 @@ if __name__ == "__main__":
         # 1. TEXT TRANSLATION (Whisper)
         t0 = time.time()
         transcription = stt_pipeline(AUDIO_FILE)["text"].strip()
+        ui_event("transcription", text=transcription)
         time_whisper = time.time() - t0
         
         if not transcription:
@@ -404,7 +421,7 @@ if __name__ == "__main__":
 
         # Handle reply of user in case of conflict
         if pending_clarification in ("conflict", "no_data"):
-            print("🧠 Resolving previous emotional conflict/no_data from user reply...")
+            print("Resolving previous emotional conflict/no_data from user reply...")
 
             final_emotion, final_distribution = resolve_conflict_with_user(
                 transcription,
@@ -441,9 +458,22 @@ if __name__ == "__main__":
                 emotion_profile_text=emotion_profile_text
                 )
 
-            print(f"🗣️ User Said: '{transcription}'")
-            print(f"\n💬 Agent: {agent_reply}")
+            print(f"User Said: '{transcription}'")
+            print(f"\nAgent: {agent_reply}")
             text_to_speech(tts_model, agent_reply)
+
+            total_time = time_whisper
+            ui_event(
+                "latency",
+                items={
+                    "whisper": float(time_whisper),
+                    "text_emotion": 0.0,
+                    "audio_emotion": 0.0,
+                    "video_emotion": 0.0,
+                    "llm": 0.0,
+                    "total": float(total_time),
+                }
+            )
 
             turn_counter += 1
             continue 
@@ -580,7 +610,7 @@ if __name__ == "__main__":
 
         # --- PRINT LATENCY REPORT ---
         print("\n" + "="*60)
-        print("⏱️ LATENCY BENCHMARKING REPORT")
+        print("LATENCY BENCHMARKING REPORT")
         print("="*60)
         print(f"  - Whisper (Speech to Text) : {time_whisper:.2f} seconds")
         print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
@@ -592,6 +622,17 @@ if __name__ == "__main__":
         total_time = time_whisper + time_roberta + time_audeering + time_deepface + time_llm
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
+        ui_event(
+            "latency",
+            items={
+                "whisper": float(time_whisper),
+                "text_emotion": float(time_roberta),
+                "audio_emotion": float(time_audeering),
+                "video_emotion": float(time_deepface),
+                "llm": float(time_llm),
+                "total": float(total_time),
+            }
+        )
         
         turn_counter += 1
 

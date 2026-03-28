@@ -15,7 +15,7 @@ import streamlit as st
 # ============================================================
 # CONFIG
 # ============================================================
-TARGET_SCRIPT = "master_fusion.py"   # <-- change if needed
+TARGET_SCRIPT = "master_fusion_basic.py"   # <-- change if needed
 ROOT_DIR = Path(__file__).resolve().parent
 SCRIPT_PATH = ROOT_DIR / TARGET_SCRIPT
 MAX_LOG_LINES = 3000
