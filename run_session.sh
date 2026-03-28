@@ -45,8 +45,13 @@ cd "$SCRIPT_DIR/input_model"
 # Need to check on Mac whether is does run script.
 # Set PYTHON_EXEC to your python executable path at the top of this file.
 if command -v script >/dev/null 2>&1; then
-    # util-linux script syntax: -c runs command while recording the terminal session.
-    script -q "$LOG_FILE" -c "$PYTHON_EXEC -u master_fusion.py"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        # BSD/macOS script syntax: script [-q] file command [args...]
+        script -q "$LOG_FILE" "$PYTHON_EXEC" -u master_fusion.py
+    else
+        # util-linux script syntax: -c runs command while recording the terminal session.
+        script -q "$LOG_FILE" -c "$PYTHON_EXEC -u master_fusion.py"
+    fi
 else
     echo "Notice: 'script' command not found. Falling back to tee logging."
     "$PYTHON_EXEC" -u master_fusion.py 2>&1 | tee "$LOG_FILE"
