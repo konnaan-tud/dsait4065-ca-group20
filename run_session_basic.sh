@@ -36,24 +36,7 @@ LOG_FILE="$SAVE_PATH/session.log"
 echo "Starting master_fusion_basic.py..."
 cd "$SCRIPT_DIR/input_model"
 if [ "$OS_NAME" = "Darwin" ]; then
-    # macOS workaround: avoid Python->tee pipeline, write full logs to file,
-    # and mirror them to stdout using a separate tail process.
-    echo "Notice: macOS detected, using file logging + tail mirror."
-    : > "$LOG_FILE"
-    tail -n 0 -f "$LOG_FILE" &
-    TAIL_PID=$!
-
-    set +e
-    "$PYTHON_EXEC" -u master_fusion_basic.py >> "$LOG_FILE" 2>&1
-    PY_EXIT=$?
-    set -e
-
-    kill "$TAIL_PID" 2>/dev/null || true
-    wait "$TAIL_PID" 2>/dev/null || true
-
-    if [ "$PY_EXIT" -ne 0 ]; then
-        exit "$PY_EXIT"
-    fi
+    script -q "$LOG_FILE" $PYTHON_EXEC -u master_fusion_basic.py
 elif command -v script >/dev/null 2>&1; then
     # util-linux script syntax: -c runs command while recording the terminal session.
     script -q "$LOG_FILE" -c "$PYTHON_EXEC -u master_fusion_basic.py"

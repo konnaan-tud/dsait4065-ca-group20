@@ -17,7 +17,8 @@ import streamlit as st
 # ============================================================
 # CONFIG
 # ============================================================
-TARGET_SCRIPT = "master_fusion.py"   # <-- change if needed
+TARGET_SCRIPT = "master_fusion.py"
+# TARGET_SCRIPT = "master_fusion_basic.py"
 ROOT_DIR = Path(__file__).resolve().parent
 SCRIPT_PATH = ROOT_DIR / TARGET_SCRIPT
 PROJECT_DIR = ROOT_DIR.parent
@@ -374,11 +375,14 @@ def start_process():
     if SESSION_RUNNER_SCRIPT.exists():
         bash_kind, bash_exe = detect_bash_executable()
         if bash_exe:
-            if bash_kind == "wsl":
-                runner_path = to_wsl_path(SESSION_RUNNER_SCRIPT)
+            if os.name == "nt":
+                if bash_kind == "wsl":
+                    runner_path = to_wsl_path(SESSION_RUNNER_SCRIPT)
+                else:
+                    runner_path = to_msys_path(SESSION_RUNNER_SCRIPT)
+                launch_cmd = [bash_exe, "-lc", f"'{runner_path}'"]
             else:
-                runner_path = to_msys_path(SESSION_RUNNER_SCRIPT)
-            launch_cmd = [bash_exe, "-lc", f"'{runner_path}'"]
+                launch_cmd = [bash_exe, str(SESSION_RUNNER_SCRIPT)]
             launch_cwd = str(PROJECT_DIR)
             log(f"[system] Launching via session runner ({bash_kind} bash): {SESSION_RUNNER_SCRIPT.name}")
         else:
