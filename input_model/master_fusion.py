@@ -439,6 +439,8 @@ def generate_agent_reply(transcription, text_top, modalities,
 
 def text_to_speech(tts_model, sentence):
     tts_model.tts_to_file(text=sentence, file_path="output.wav")
+    # Emit right before playback so UI and audible response are aligned.
+    ui_event("agent_reply", text=sentence)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
@@ -814,7 +816,6 @@ if __name__ == "__main__":
             emotion_profile_text=emotion_profile_text, 
             memory_data=memory_data
         )
-        ui_event("agent_reply", text=agent_reply)
         time_llm = time.time() - t0
 
         print_final_output(transcription, top_3_text, arousal, valence, dominance,
