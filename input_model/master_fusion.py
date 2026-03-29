@@ -4,6 +4,7 @@ import transformers.modeling_utils
 transformers.utils.import_utils.check_torch_load_is_safe = lambda: None
 transformers.modeling_utils.check_torch_load_is_safe = lambda: None
 
+import json
 import cv2
 import json
 import os
@@ -48,6 +49,17 @@ last_valid_agent_utterance = ""  # 💡 Added this variable to track the convers
 narrative_summary = ""
 summary_lock = threading.Lock()
 turns_for_summary = [] # Buffer to hold the recent turns before summarizing
+
+# Lock to prevent stdout race conditions between threads (e.g. background
+# summary thread printing at the same time as ui_event, which merges lines
+# and breaks the UI's event parser).
+_print_lock = threading.Lock()
+
+# Helper function to print events Streamlit can listen for
+def ui_event(event_type, **payload):
+    event = {"type": event_type, **payload}
+    with _print_lock:
+        print("UI_EVENT::" + json.dumps(event), flush=True)
 
 # Maps modalities apparently not all modalities have the same name for emotions
 def normalize_emotion(label):
@@ -115,33 +127,33 @@ def fetch_temporal_memory(db, current_text, current_emotion_dist):
 def print_final_output(transcription, top_3_text, ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
-        print("🤖 AGENT RESPONSE")
+        print("AGENT RESPONSE")
         print("="*60)
 
-        print(f"🗣️ User Said: '{transcription}'")
-        print(f"\n💬 Agent: {agent_reply}")
+        print(f"User Said: '{transcription}'")
+        print(f"\nAgent: {agent_reply}")
 
-        print("\n📖 TEXT MODALITY:")
+        print("\nTEXT MODALITY:")
         for emo,score in top_3_text:
             print(f"   {emo}: {score:.2f}")
 
-        print("\n🎵 AUDIO MODALITY:")
+        print("\nAUDIO MODALITY:")
         print("   Ekman probabilities:")
         for emo, score in ekman_probs_norm.items():
             print(f"   {emo}: {score:.2f}")
 
-        print("\n🎭 VIDEO MODALITY:")
+        print("\nVIDEO MODALITY:")
         if valid_frames>0:
             sorted_face=sorted(avg_emotions.items(), key=lambda x:x[1], reverse=True)
             for emo,score in sorted_face[:3]:
                 print(f"   {emo}: {score:.2f}")
 
-        print("\n🔎 CONFIDENCE CHECK")
+        print("\nCONFIDENCE CHECK")
         print(f"Text confident  : {text_confident} (diff={text_diff:.2f})")
         print(f"Audio confident : {audio_confident} (diff={audio_diff:.2f})")
         print(f"Face confident  : {face_confident} (diff={face_diff:.2f})")
 
-        print("\n🧠 DECISION DEBUG")
+        print("\nDECISION DEBUG")
         print(f"Decision type: {decision}")
         print(f"Number of confident modalities: {len(modalities)}")
 
@@ -150,19 +162,20 @@ def print_final_output(transcription, top_3_text, ekman_probs_norm, avg_emotions
         
         # 💡 NEW: Cleanly print the Memory Match right here in the final output!
         if memory_data and memory_data.get("past_text"):
-            print("\n🕰️ TEMPORAL MEMORY CHECK")
+            print("\nTEMPORAL MEMORY CHECK")
             print(f"Past Event Matched: '{memory_data['past_text']}'")
             print(f"Past Dominant Emo : {memory_data['past_top']}")
             print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
             if memory_data['is_contradiction']:
-                print(f"   ⚠️ Memory vs Present Events Contradiction Detected (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
+                print(f"   Memory vs Present Events Contradiction Detected (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
             else:
-                print(f"   ✅ Memory & Present Events Alignment Detected (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
+                print(f"   Memory & Present Events Alignment Detected (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
 
 # --- HYBRID MEMORY: ASYNCHRONOUS RUNNING SUMMARY ---
 def update_running_summary(recent_turns, current_summary):
     global narrative_summary
-    print("\n🔄 [Semantic Memory] Background thread summarizing recent turns...")
+    with _print_lock:
+        print("\n[Semantic Memory] Background thread summarizing recent turns...", flush=True)
     
     transcript = "\n".join(recent_turns)
     
@@ -201,12 +214,15 @@ def update_running_summary(recent_turns, current_summary):
         time_summary = time.time() - t0_summary
         
         new_summary = response.json().get("message", {}).get("content", "").strip()
+        ui_event("running_summary", text=new_summary)
         if new_summary:
             with summary_lock:
                 narrative_summary = new_summary
-            print(f"\n✅ [Semantic Memory] Running Summary Updated in Background! (Latency: {time_summary:.2f} seconds)")
+            with _print_lock:
+                print(f"\n[Semantic Memory] Running Summary Updated in Background! (Latency: {time_summary:.2f} seconds)", flush=True)
     except Exception as e:
-        print(f"\n⚠️ [Semantic Memory] Summary update failed: {e}")
+        with _print_lock:
+            print(f"\n[Semantic Memory] Summary update failed: {e}", flush=True)
 
 # --- 1. THREAD: VIDEO RECORDER ---
 def record_video(frames, cap):
@@ -222,7 +238,7 @@ def record_video(frames, cap):
 
 # --- 3. MODEL INITIALIZATION ---
 def model_initialization():
-    print("🧠 Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
+    print("Waking up the Multimodal AI Brain... (This will take 10-15 seconds)")
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print("  -> Loading Whisper...")
     stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
@@ -230,8 +246,8 @@ def model_initialization():
     text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
     print("  -> Loading WavLM Prosodic Categorical Emotions...")
     prosodic_model = ProsodicCategorical()
-    tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
-    #tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
+    #tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
+    tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
     return stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
@@ -248,10 +264,10 @@ def process_audio(audio_data):
             audio_data.append(indata.copy())
 
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=audio_callback):
-        print("\n🔴 Recording! Speak naturally.")
-        input("🛑 Press [ENTER] when you are finished talking...\n")
+        print("\nRecording! Speak naturally.")
+        input("Press [ENTER] when you are finished talking...\n")
         
-    print("\n✅ Recording stopped.")
+    print("\nRecording stopped.")
     is_recording = False
 
 def process_video_frames(video_frames, cap):
@@ -292,13 +308,13 @@ def generate_agent_reply(transcription, text_top, modalities,
 
     global last_valid_agent_utterance
 
-    print("\n🧠 Sending profile to LLM...")
+    print("\nSending profile to LLM...")
 
     with summary_lock:
         current_summary = narrative_summary
 
     if current_summary:
-        print(f'\n🧠 Current Semantic Summary:\n  {current_summary}')
+        print(f'\nCurrent Semantic Summary:\n  {current_summary}')
 
     # --- DYNAMIC SYSTEM PROMPT INJECTION ---
     base_system = """You are an empathetic, human-like conversational partner. Your goal is to establish "common ground" with the user regarding their emotional story. 
@@ -444,12 +460,13 @@ def text_to_speech(tts_model, sentence):
         speed=0.5  
     )
     time_tts = time.time() - t0 # Stop timer
+    ui_event("agent_reply", text=sentence)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     return time_tts
 
 if __name__ == "__main__":
-    print("📸 Initializing webcam (Please click 'OK' if Mac asks for permission)...")
+    print("Initializing webcam (Please click 'OK' if Mac asks for permission)...")
     cap = cv2.VideoCapture(0)
     time.sleep(1)
     stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device = model_initialization()
@@ -464,17 +481,18 @@ if __name__ == "__main__":
     pending_event = None
     
     print("\n" + "="*60)
-    print("✅ SYSTEM READY. Awaiting your turn.")
+    print("SYSTEM READY. Awaiting your turn.")
     print("="*60 + "\n")
     
     while True:
-
+        ui_event("awaiting_start", turn_id=turn_counter)
+        
         print("\n" + "-"*60)
-        user_cmd = input(f"🟢 TURN {turn_counter} | Press [ENTER] to start speaking (or type 'q' to quit): ")
+        user_cmd = input(f"TURN {turn_counter} | Press [ENTER] to start speaking (or type 'q' to quit): ")
         
        # --- SESSION SAVE ON QUIT ---
         if user_cmd.strip().lower() == 'q':
-            print("\n👋 Wrapping up the conversation... Please wait a moment.")
+            print("\nWrapping up the conversation... Please wait a moment.")
             
             with summary_lock:
                 final_summary = narrative_summary
@@ -498,24 +516,34 @@ if __name__ == "__main__":
             
             chat_history.append({"role": "user", "content": final_prompt})
             payload = {"model": "llama3", "messages": chat_history, "stream": False, "think": False}
+            farewell_msg = "Thank you for chatting with me. Take care!"
             
             try:
                 response = requests.post(OLLAMA_URL, json=payload)
-                farewell_msg = response.json().get("message", {}).get("content", "Thank you for chatting with me. Take care!")
-                print("\n" + "="*60)
-                print(f"💬 Agent: {farewell_msg}")
-                print("="*60 + "\n")
+                farewell_msg = response.json().get("message", {}).get("content", farewell_msg)
             except Exception as e:
-                print("\n💬 Agent: Thank you so much for chatting with me today. Take care of yourself!")
+                farewell_msg = "Thank you so much for chatting with me today. Take care of yourself!"
+
+            print("\n" + "="*60)
+            print(f"Agent: {farewell_msg}")
+            print("="*60 + "\n")
+            try:
+                text_to_speech(tts_model, farewell_msg)
+            except Exception as e:
+                print(f"Farewell TTS failed: {e}")
 
             # --- SAVE THE SUMMARY TO DISK ---
             if final_summary:
                 filename = f"final_summary_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 with open(filename, 'w') as f:
                     json.dump({"semantic_summary": final_summary}, f, indent=4)
-                print(f"💾 Saved Final Semantic Summary to {filename}")
+                print(f"Saved Final Semantic Summary to {filename}")
                 
             break # Exit the while loop
+
+        # The turn has now truly started (user pressed Enter), so only now
+        # should the dashboard clear the previous turn details.
+        ui_event("turn_start", turn_id=turn_counter)
         
         is_recording = True
         video_frames = []
@@ -530,7 +558,7 @@ if __name__ == "__main__":
         vt.join(timeout=2.0)
 
         if len(audio_data) == 0:
-            print("⚠️ No audio detected. Try again.")
+            print("No audio detected. Try again.")
             continue
  
         # MOVED THIS HERE: Now it is completely safe from crashing!
@@ -544,15 +572,16 @@ if __name__ == "__main__":
         # 1. TEXT TRANSLATION (Whisper)
         t0 = time.time()
         transcription = stt_pipeline(AUDIO_FILE)["text"].strip()
+        ui_event("transcription", text=transcription)
         time_whisper = time.time() - t0
         
         if not transcription:
-            print("⚠️ Whisper didn't hear any words. Try speaking louder.")
+            print("Whisper didn't hear any words. Try speaking louder.")
             continue
 
         # Handle reply of user in case of conflict
         if pending_clarification in ("conflict", "no_data"):
-            print("🧠 Resolving previous emotional conflict/no_data from user reply...")
+            print("Resolving previous emotional conflict/no_data from user reply...")
 
             final_emotion, final_distribution = resolve_conflict_with_user(
                 transcription,
@@ -576,7 +605,7 @@ if __name__ == "__main__":
 
             emotion_profile_text = f"The user has clarified their feelings ({final_emotion}). Focus purely on the content of their explanation."
 
-            print(f"💾 Stored resolved emotion → {final_emotion} ({final_distribution})")
+            print(f"Stored resolved emotion -> {final_emotion} ({final_distribution})")
 
             pending_clarification = None
 
@@ -596,18 +625,18 @@ if __name__ == "__main__":
 
             # 💡 Cleanly print the memory check for resolved turns
             if memory_data and memory_data.get("past_text"):
-                print("\n🕰️ TEMPORAL MEMORY CHECK (Detour Resolved)")
+                print("\nTEMPORAL MEMORY CHECK (Detour Resolved)")
                 print(f"Past Event Matched: '{memory_data['past_text']}'")
                 print(f"Vector Distance   : {memory_data['mae']:.3f} (MAE)")
                 if memory_data['is_contradiction']:
-                    print(f"Result            : ⚠️ CONTRADICTION (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
+                    print(f"Result            : CONTRADICTION (Threshold > {MEMORY_CONTRADICTION_THRESHOLD})")
                 else:
-                    print(f"Result            : ✅ ALIGNMENT (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
+                    print(f"Result            : ALIGNMENT (Threshold <= {MEMORY_CONTRADICTION_THRESHOLD})")
 
-            print(f"🗣️ User Said: '{transcription}'")
-            print(f"\n💬 Agent: {agent_reply}")
+            print(f"User Said: '{transcription}'")
+            print(f"\nAgent: {agent_reply}")
             time_tts = text_to_speech(tts_model, agent_reply)
-            print(f"⏱️ TTS Generation Latency: {time_tts:.2f} seconds")
+            print(f"TTS Generation Latency: {time_tts:.2f} seconds")
             # 💡 FIX: Add the resolution turn to the summary queue before continuing!
             turns_for_summary.append(f"User: {transcription} [Detected Emotion: {final_emotion}]\nAgent: {agent_reply}")
             if len(turns_for_summary) >= 3:
@@ -632,6 +661,10 @@ if __name__ == "__main__":
         text_confident, text_top, text_score, text_diff = is_confident(text_emotions_norm)
         # Keep only Top 3 for the LLM prompt and printing
         top_3_text = [(res['label'], res['score']) for res in all_text_emotions[:3]]
+        ui_event(
+            "text_top3",
+            items=[{"label": label, "score": float(score)} for label, score in top_3_text]
+        )
         time_roberta = time.time() - t0
     
         # 3. PROSODIC EMOTION (WavLM Categorical)
@@ -639,12 +672,22 @@ if __name__ == "__main__":
         ekman_probs = prosodic_model.predict(AUDIO_FILE)
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
+        ui_event(
+            "audio_probs",
+            items={k: float(v) for k, v in ekman_probs_norm.items()}
+        )
+
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
         time_prosodic = time.time() - t0
         
         # 4. FACIAL EMOTION (DeepFace)
         t0 = time.time()
         top_face_emo, avg_emotions_norm, valid_frames, face_confident, face_score, face_diff = process_video_frames(video_frames, cap)
+        ui_event(
+            "video_probs",
+            items={k: float(v) for k, v in avg_emotions_norm.items()} if valid_frames > 0 else {},
+            valid_frames=int(valid_frames)
+        )
         time_deepface = time.time() - t0
 
         # Define which modalities will be considered in the final output.
@@ -672,6 +715,30 @@ if __name__ == "__main__":
                 "confidence": face_score
             }
         
+        ui_event(
+            "confidence",
+            items={
+                "text": {
+                    "confident": bool(text_confident),
+                    "diff": float(text_diff),
+                    "top": text_top,
+                    "score": float(text_score),
+                },
+                "audio": {
+                    "confident": bool(audio_confident),
+                    "diff": float(audio_diff),
+                    "top": audio_top,
+                    "score": float(audio_score),
+                },
+                "face": {
+                    "confident": bool(face_confident),
+                    "diff": float(face_diff),
+                    "top": top_face_emo,
+                    "score": float(face_score) if valid_frames > 0 else 0.0,
+                },
+            }
+        )
+
         # Remove outliers
         modalities = prune_low_confidence_modalities(modalities)
 
@@ -736,6 +803,18 @@ if __name__ == "__main__":
 
             emotion_profile_text = "\n".join(emotion_profile)
 
+        ui_event(
+            "decision",
+            decision=decision,
+            modalities={
+                name: {
+                    "top": m["top"],
+                    "confidence": float(m["confidence"]),
+                }
+                for name, m in modalities.items()
+            }
+        )
+
         # --- 5. EPISODIC MEMORY (CHROMA DB) WITH MAE MATH ---
         t0 = time.time()
         memory_data = {"past_text": None, "mae": 0.0, "is_contradiction": False, "past_top": None}
@@ -786,14 +865,14 @@ if __name__ == "__main__":
                 "emotion_distribution":  fused_dist
             }
             db.add(transcription, emotions_record)
-            print(f"💾 Turn stored in Chroma (id: {transcription[:40]}...)")
-            print(f"Stored FINAL emotion in Chroma → {final_emotion} ({fused_dist})")
+            print(f"Turn stored in Chroma (id: {transcription[:40]}...)")
+            print(f"Stored FINAL emotion in Chroma -> {final_emotion} ({fused_dist})")
         else:
             print("Skipping DB storage (no resolved emotion)")
 
         # --- PRINT LATENCY REPORT ---
         print("\n" + "="*60)
-        print("⏱️ LATENCY BENCHMARKING REPORT")
+        print("LATENCY BENCHMARKING REPORT")
         print("="*60)
         print(f"  - Whisper (Speech to Text) : {time_whisper:.2f} seconds")
         print(f"  - RoBERTa (Text Emotion)   : {time_roberta:.2f} seconds")
@@ -806,7 +885,18 @@ if __name__ == "__main__":
         total_time = time_whisper + time_roberta + time_prosodic + time_deepface + time_db + time_llm + time_tts
         print(f"  - TOTAL PIPELINE LATENCY   : {total_time:.2f} seconds")
         print("="*60 + "\n")
-        
+        ui_event(
+            "latency",
+            items={
+                "whisper": float(time_whisper),
+                "text_emotion": float(time_roberta),
+                "audio_emotion": float(time_prosodic),
+                "video_emotion": float(time_deepface),
+                "memory_fetch": float(time_db),
+                "llm": float(time_llm),
+                "total": float(total_time),
+            }
+        )
         turn_counter += 1
 
     cap.release()

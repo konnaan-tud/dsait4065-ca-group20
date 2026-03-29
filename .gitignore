@@ -4,7 +4,15 @@ venv/
 .venv/
 test/
 input_model/chroma_db/
+/chroma_db/
 input_model/debug_frames/
+/debug_frames/
 input_model/audio_recordings/
 sessions/
+sessions_basic/
 input_model/output_wav.
+
+**/__pycache__/
+*.json
+*.txt
+*.wav

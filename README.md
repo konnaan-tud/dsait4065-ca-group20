@@ -23,7 +23,8 @@ You must have Ollama installed and running locally with the Llama 3 model downlo
     ollama run llama3
     ```
 
-## How to Run
+## How to Run in the Terminal
+
 Open your terminal and execute the script:
 
 ```
@@ -45,3 +46,32 @@ Once recording stops, the script will sequentially run the classifiers. It will 
 - A latency benchmark report detailing the processing time for each individual model and the total pipeline latency.
 
 Note: For debugging purposes, the script also saves the captured video frames in a debug_frames/ directory.
+
+## How to Run Web UI
+
+You can run a detailed debug view with
+
+```
+cd input_model
+streamlit run ui_debug.py
+```
+
+This will automatically open a browser window with the agent. To start a conversation, click 'Session controls', and 'Launch agent'.
+
+For a simplistic view (the view we will use for the user study), run
+
+```
+cd input_model
+streamlit run ui_simple.py
+```
+
+### Known issues
+
+There are some minor issues that are annoying, but acceptable. I want to stop coding for today, so I am not fixing them today.
+
+1. There is a flickering 'Stop' button and some other buttons at the top right of the display, that I believe are just part of the Streamlit package. There is probably some way to disable them.
+
+2. If you stop a conversation, reset the chat window, and do not refresh the page, some UI content will not dissappear. Once you launch the agent, you start another conversation, and your input is processed by Whisper (and thus appears on screen), the UI content is correct again.
+
+
+3. I added a chroma db related UI event, but it did not appear in the debug UI. I like the emotion debug windows, so it would be nice to have this.
