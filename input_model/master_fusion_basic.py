@@ -18,9 +18,7 @@ import requests
 from datetime import datetime
 from transformers import pipeline
 from deepface import DeepFace
-from prosodic_modality.prosodic_abstraction import ProsodyEmotionPredictor
-from prosodic_modality.test_audeering import Wav2Small 
-from prosodic_modality.vad_mapping import VADEmotionMapper, load_vad_prototypes
+from prosodic_modality.wavlm_cat import ProsodicCategorical
 from TTS.api import TTS
 import subprocess
 from confidence import is_confident, prune_low_confidence_modalities
@@ -86,7 +84,7 @@ def resolve_conflict_with_user(user_reply, text_emotion_pipeline):
     return predicted["label"], flat_distribution
 
 
-def print_final_output(transcription, top_3_text, arousal, valence, dominance,
+def print_final_output(transcription, top_3_text,
                        ekman_probs_norm, avg_emotions, valid_frames, agent_reply, text_confident, 
                        text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff, memory_data=None):
         print("\n" + "="*60)
@@ -143,10 +141,11 @@ def model_initialization():
     stt_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device)
     print("  -> Loading DistilRoBERTa Text Emotions (7 Ekman)...")
     text_emotion_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
-    print("  -> Loading Audeering Prosodic Emotions...")
-    audeering_model = Wav2Small.from_pretrained('audeering/wav2small').to(device).eval()
+    print("  -> Loading WavLM Prosodic Categorical Emotions...")
+    prosodic_model = ProsodicCategorical()
+    #tts_model = TTS(model_name="tts_models/en/jenny/jenny", progress_bar=False, gpu=False)
     tts_model = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False)
-    return stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device
+    return stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device
 
 def save_debug_frames(video_frames, turn_counter):
     os.makedirs(DEBUG_FRAMES_DIR, exist_ok=True)
@@ -211,9 +210,9 @@ def generate_agent_reply(transcription, text_top, modalities, final_emotion, cha
     base_system = """You are an empathetic, human-like conversational partner. Your goal is to establish "common ground" with the user regarding their emotional story.
 
     CRITICAL RULES:
-    1. Acknowledge their situation gracefully, but NEVER use the exact emotion labels provided in your hidden context (e.g., do not say "You are feeling anger/neutral").
-    2. NEVER start your sentences with cliché therapy phrases like "It sounds like...", "I sense...", or "I hear you saying...". Speak naturally like a friend.
-    3. Ask one gentle and simple clarification question to keep the narrative flowing.
+    1. Acknowledge their situation gracefully, but don't use the exact emotion labels provided in your hidden context (e.g., do not say "You are feeling anger/neutral").
+    2. Start your sentences directly and naturally like a friend, avoiding robotic therapy phrasing.
+    3. NARRATIVE & EMOTION BALANCE: Ask one engaging follow-up question that connects their feelings to the actual events or people involved. Instead of just asking "how does that make you feel?", ask about the specific actions or moments that drove those feelings.
     4. Keep your response strictly under 3 sentences."""
 
     chat_history[0]["content"] = base_system
@@ -253,11 +252,12 @@ def generate_agent_reply(transcription, text_top, modalities, final_emotion, cha
         User's true emotion: {text_top}
 
         Instructions:
-        - Briefly validate their true feeling (e.g., "Thank you for clarifying...").
-        - IMPORTANT: We just took a brief detour. You need to return to the conversation. 
-        - The last topic or question you were discussing before the detour was: "{last_valid_agent_utterance}"
+        - Empathetically acknowledge whatever they just said (whether they named a specific feeling or admitted they don't know). 
+        - CRITICAL RULE: Do NOT use robotic phrases like "Thank you for clarifying." Respond like a supportive human friend.
+        - IMPORTANT: You need to seamlessly return to the main conversation. 
+        - The last thing you were discussing before the detour was: "{last_valid_agent_utterance}"
         - Naturally transition BACK to that topic or continue the thought. 
-        - Keep it seamless and conversational, strictly under 3 sentences.
+        - Keep it compassionate, conversational, and strictly under 3 sentences.
         """
         chat_history.append({"role": "user", "content": contextual_user_message})
     elif decision == "no_data":
@@ -315,7 +315,11 @@ def generate_agent_reply(transcription, text_top, modalities, final_emotion, cha
 
 def text_to_speech(tts_model, sentence):
     t0 = time.time()
-    tts_model.tts_to_file(text=sentence, file_path="output.wav")
+    tts_model.tts_to_file(
+        text=sentence, 
+        file_path="output.wav",
+        speed=0.5  
+    )
     time_tts = time.time() - t0 # Stop timer
     ui_event("agent_reply", text=sentence)
     subprocess.run(["ffplay", "-nodisp", "-autoexit", "output.wav"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -325,7 +329,7 @@ if __name__ == "__main__":
     print("Initializing webcam (Please click 'OK' if Mac asks for permission)...")
     cap = cv2.VideoCapture(0)
     time.sleep(1)
-    stt_pipeline, text_emotion_pipeline, audeering_model, tts_model, device = model_initialization()
+    stt_pipeline, text_emotion_pipeline, prosodic_model, tts_model, device = model_initialization()
     
     os.makedirs(AUDIO_DIR, exist_ok=True)
 
@@ -388,12 +392,6 @@ if __name__ == "__main__":
         is_recording = True
         video_frames = []
         audio_data = []
-        prosodic_predictor = ProsodyEmotionPredictor(device=device)
-        vad_mapper = VADEmotionMapper(
-            prototypes=load_vad_prototypes(os.path.join(os.path.dirname(__file__), "prosodic_modality", "vad_mapping.csv")), # prototypes=load_vad_prototypes("vad_mapping.csv"),
-            weights=(1.0,1.0,1.0),
-            temperature=0.25
-        )
     
         vt = threading.Thread(target=record_video, args=(video_frames, cap,))
         vt.daemon = True
@@ -495,12 +493,7 @@ if __name__ == "__main__":
         time_roberta = time.time() - t0
     
         # 3. PROSODIC EMOTION (Audeering)
-        t0 = time.time()
-        signal = torch.from_numpy(librosa.load(AUDIO_FILE, sr=SAMPLE_RATE)[0])[None, :]
-        with torch.no_grad():
-            logits = audeering_model(signal.to(device))
-        arousal, dominance, valence = logits[0, 0].item(), logits[0, 1].item(), logits[0, 2].item()
-        ekman_probs = vad_mapper.predict_proba((valence, arousal, dominance))
+        ekman_probs = prosodic_model.predict(AUDIO_FILE)
         ekman_probs_norm = {normalize_emotion(k): v for k, v in ekman_probs.items()}
 
         audio_confident, audio_top, audio_score, audio_diff = is_confident(ekman_probs_norm)
@@ -608,7 +601,7 @@ if __name__ == "__main__":
         )
         time_llm = time.time() - t0
 
-        print_final_output(transcription, top_3_text, arousal, valence, dominance,
+        print_final_output(transcription, top_3_text,
                         ekman_probs_norm, avg_emotions_norm, valid_frames, agent_reply, text_confident, 
                         text_diff, audio_confident, audio_diff, decision, modalities, face_confident, face_diff)
         save_debug_frames(video_frames, turn_counter)
